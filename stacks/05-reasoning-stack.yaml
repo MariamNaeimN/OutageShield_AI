@@ -85,6 +85,7 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
       Policies:
         - PolicyName: RootCausePolicy
           PolicyDocument:
@@ -112,6 +113,8 @@ Resources:
       Role: !GetAtt RootCauseLambdaRole.Arn
       Timeout: 90
       MemorySize: 1024
+      TracingConfig:
+        Mode: Active
       Environment:
         Variables:
           ENVIRONMENT: !Ref Environment
@@ -240,6 +243,8 @@ Resources:
       Role: !GetAtt RemediationLambdaRole.Arn
       Timeout: 60
       MemorySize: 512
+      TracingConfig:
+        Mode: Active
       Environment:
         Variables:
           ENVIRONMENT: !Ref Environment
@@ -316,6 +321,8 @@ Resources:
       Role: !GetAtt RootCauseLambdaRole.Arn
       Timeout: 30
       MemorySize: 256
+      TracingConfig:
+        Mode: Active
       Environment:
         Variables:
           ENVIRONMENT: !Ref Environment
@@ -413,6 +420,8 @@ Resources:
       Role: !GetAtt RootCauseLambdaRole.Arn
       Timeout: 120
       MemorySize: 1024
+      TracingConfig:
+        Mode: Active
       Environment:
         Variables:
           ENVIRONMENT: !Ref Environment

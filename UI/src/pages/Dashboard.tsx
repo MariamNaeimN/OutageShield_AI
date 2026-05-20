@@ -113,6 +113,7 @@ export default function Dashboard() {
                 <thead>
                   <tr className="border-b border-gray-800">
                     <th className="text-left text-xs font-medium text-gray-400 uppercase px-4 py-3">ID</th>
+                    <th className="text-left text-xs font-medium text-gray-400 uppercase px-4 py-3">Source</th>
                     <th className="text-left text-xs font-medium text-gray-400 uppercase px-4 py-3">Service</th>
                     <th className="text-left text-xs font-medium text-gray-400 uppercase px-4 py-3">Severity</th>
                     <th className="text-left text-xs font-medium text-gray-400 uppercase px-4 py-3">Status</th>
@@ -127,6 +128,9 @@ export default function Dashboard() {
                         <Link to={`/incidents/${incident.id}`} className="text-sm font-medium text-blue-400 hover:text-blue-300">
                           {incident.id}
                         </Link>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-900/50 text-blue-300">aws.cloudwatch</span>
                       </td>
                       <td className="px-4 py-3 text-sm text-gray-300">{incident.service}</td>
                       <td className="px-4 py-3"><SeverityPill severity={incident.severity} /></td>

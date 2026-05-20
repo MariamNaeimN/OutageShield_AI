@@ -57,6 +57,13 @@ Resources:
                 Resource:
                   - !ImportValue
                     Fn::Sub: outageshield-storage-${Environment}-IncidentsTableArn
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingTargets
+                Resource: '*'
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Full 9-Step Incident Investigation State Machine
@@ -66,6 +73,8 @@ Resources:
     Properties:
       StateMachineName: !Sub outageshield-workflow-${Environment}
       RoleArn: !GetAtt WorkflowExecutionRole.Arn
+      TracingConfiguration:
+        Enabled: true
       DefinitionString:
         Fn::Sub:
           - |

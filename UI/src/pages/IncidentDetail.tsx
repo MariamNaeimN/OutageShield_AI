@@ -166,6 +166,53 @@ export default function IncidentDetail() {
               </div>
             </div>
           )}
+
+          {/* SNS Notification */}
+          {(() => {
+            const raw = incident as unknown as Record<string, unknown>
+            const notifStr = raw.notifications as string | undefined
+            if (!notifStr) return null
+            try {
+              const notif = JSON.parse(notifStr)
+              return (
+                <div className="bg-[#161b22] border border-gray-800 rounded-xl p-5">
+                  <h3 className="text-sm font-semibold text-white mb-3">SNS Notification</h3>
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-3">
+                      <span className={`px-2 py-0.5 rounded text-xs font-bold ${notif.type === 'escalation' ? 'bg-red-900/50 text-red-300' : 'bg-blue-900/50 text-blue-300'}`}>
+                        {notif.type || 'alert'}
+                      </span>
+                      <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-900/30 text-green-300">
+                        {notif.status || 'sent'}
+                      </span>
+                      <span className="text-xs text-gray-500">{notif.channel || 'SNS'}</span>
+                    </div>
+                    {notif.recipient && (
+                      <div>
+                        <p className="text-xs text-gray-500">Recipient</p>
+                        <p className="text-sm text-gray-300">{notif.recipient}</p>
+                      </div>
+                    )}
+                    {notif.subject && (
+                      <div>
+                        <p className="text-xs text-gray-500">Subject</p>
+                        <p className="text-sm text-gray-200 font-medium">{notif.subject}</p>
+                      </div>
+                    )}
+                    {notif.message && (
+                      <div>
+                        <p className="text-xs text-gray-500">Message</p>
+                        <pre className="text-xs text-gray-300 bg-gray-900 rounded p-3 mt-1 whitespace-pre-wrap">{notif.message.replace(/\\n/g, '\n')}</pre>
+                      </div>
+                    )}
+                    {notif.sent_at && (
+                      <p className="text-xs text-gray-600 mt-2">Sent: {new Date(notif.sent_at).toLocaleString()}</p>
+                    )}
+                  </div>
+                </div>
+              )
+            } catch { return null }
+          })()}
         </div>
 
         {/* Right: Scores */}

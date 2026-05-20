@@ -33,6 +33,7 @@ Resources:
             Action: sts:AssumeRole
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
       Policies:
         - PolicyName: DetectionPolicy
           PolicyDocument:
@@ -79,6 +80,8 @@ Resources:
       Role: !GetAtt DetectionLambdaRole.Arn
       Timeout: 30
       MemorySize: 512
+      TracingConfig:
+        Mode: Active
       Environment:
         Variables:
           ENVIRONMENT: !Ref Environment

@@ -92,6 +92,8 @@ Resources:
       Role: !GetAtt DashboardApiRole.Arn
       Timeout: 30
       MemorySize: 512
+      TracingConfig:
+        Mode: Active
       Environment:
         Variables:
           ENVIRONMENT: !Ref Environment

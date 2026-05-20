@@ -50,6 +50,8 @@ Resources:
       Role: !GetAtt CorrelationLambdaRole.Arn
       Timeout: 60
       MemorySize: 1024
+      TracingConfig:
+        Mode: Active
       Environment:
         Variables:
           ENVIRONMENT: !Ref Environment
