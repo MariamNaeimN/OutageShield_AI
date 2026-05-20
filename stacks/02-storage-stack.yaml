@@ -1,0 +1,326 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OutageShield AI - Storage Stack
+  DynamoDB tables for incident history, runbook mappings, and workflow state.
+  OpenSearch for full-text search and log correlation.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
+
+  OpenSearchInstanceType:
+    Type: String
+    Default: SEARCH
+    Description: OpenSearch Serverless collection type
+
+Resources:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # DynamoDB - Events Table (normalized ingested events)
+  # ─────────────────────────────────────────────────────────────────────────────
+  EventsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub outageshield-events-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: event_id
+          AttributeType: S
+        - AttributeName: service
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: event_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: service-timestamp-index
+          KeySchema:
+            - AttributeName: service
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # DynamoDB - Incidents Table
+  # ─────────────────────────────────────────────────────────────────────────────
+  IncidentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub outageshield-incidents-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: incident_id
+          AttributeType: S
+        - AttributeName: service
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+        - AttributeName: severity_score
+          AttributeType: N
+      KeySchema:
+        - AttributeName: incident_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: service-created-index
+          KeySchema:
+            - AttributeName: service
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: severity-created-index
+          KeySchema:
+            - AttributeName: severity_score
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # DynamoDB - Runbooks Table
+  # ─────────────────────────────────────────────────────────────────────────────
+  RunbooksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub outageshield-runbooks-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: runbook_id
+          AttributeType: S
+        - AttributeName: incident_type
+          AttributeType: S
+      KeySchema:
+        - AttributeName: runbook_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: incident-type-index
+          KeySchema:
+            - AttributeName: incident_type
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # DynamoDB - Workflow State Table
+  # ─────────────────────────────────────────────────────────────────────────────
+  WorkflowStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub outageshield-workflow-state-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: workflow_id
+          AttributeType: S
+        - AttributeName: incident_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: workflow_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: incident-index
+          KeySchema:
+            - AttributeName: incident_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # DynamoDB - Postmortems Table
+  # ─────────────────────────────────────────────────────────────────────────────
+  PostmortemsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub outageshield-postmortems-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: postmortem_id
+          AttributeType: S
+        - AttributeName: incident_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: postmortem_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: incident-index
+          KeySchema:
+            - AttributeName: incident_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # OpenSearch Serverless — Encryption Policy
+  # ─────────────────────────────────────────────────────────────────────────────
+  OpenSearchEncryptionPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub outageshield-enc-${Environment}
+      Type: encryption
+      Policy: !Sub |
+        {
+          "Rules": [
+            {
+              "ResourceType": "collection",
+              "Resource": ["collection/outageshield-${Environment}"]
+            }
+          ],
+          "AWSOwnedKey": true
+        }
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # OpenSearch Serverless — Network Policy (public access for demo)
+  # ─────────────────────────────────────────────────────────────────────────────
+  OpenSearchNetworkPolicy:
+    Type: AWS::OpenSearchServerless::SecurityPolicy
+    Properties:
+      Name: !Sub outageshield-net-${Environment}
+      Type: network
+      Policy: !Sub |
+        [
+          {
+            "Rules": [
+              {
+                "ResourceType": "collection",
+                "Resource": ["collection/outageshield-${Environment}"]
+              },
+              {
+                "ResourceType": "dashboard",
+                "Resource": ["collection/outageshield-${Environment}"]
+              }
+            ],
+            "AllowFromPublic": true
+          }
+        ]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # OpenSearch Serverless — Data Access Policy
+  # ─────────────────────────────────────────────────────────────────────────────
+  OpenSearchDataAccessPolicy:
+    Type: AWS::OpenSearchServerless::AccessPolicy
+    Properties:
+      Name: !Sub outageshield-data-${Environment}
+      Type: data
+      Policy: !Sub |
+        [
+          {
+            "Rules": [
+              {
+                "ResourceType": "collection",
+                "Resource": ["collection/outageshield-${Environment}"],
+                "Permission": ["aoss:CreateCollectionItems", "aoss:UpdateCollectionItems", "aoss:DescribeCollectionItems"]
+              },
+              {
+                "ResourceType": "index",
+                "Resource": ["index/outageshield-${Environment}/*"],
+                "Permission": ["aoss:CreateIndex", "aoss:UpdateIndex", "aoss:DescribeIndex", "aoss:ReadDocument", "aoss:WriteDocument"]
+              }
+            ],
+            "Principal": ["arn:aws:iam::${AWS::AccountId}:root"]
+          }
+        ]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # OpenSearch Serverless — Collection (SEARCH type)
+  # ─────────────────────────────────────────────────────────────────────────────
+  OpenSearchCollection:
+    Type: AWS::OpenSearchServerless::Collection
+    DependsOn:
+      - OpenSearchEncryptionPolicy
+      - OpenSearchNetworkPolicy
+      - OpenSearchDataAccessPolicy
+    Properties:
+      Name: !Sub outageshield-${Environment}
+      Type: SEARCH
+      Description: OutageShield AI — incident context search and log correlation
+
+Outputs:
+  EventsTableName:
+    Description: Events DynamoDB table name
+    Value: !Ref EventsTable
+    Export:
+      Name: !Sub outageshield-storage-${Environment}-EventsTableName
+
+  EventsTableArn:
+    Description: Events DynamoDB table ARN
+    Value: !GetAtt EventsTable.Arn
+    Export:
+      Name: !Sub outageshield-storage-${Environment}-EventsTableArn
+
+  IncidentsTableName:
+    Description: Incidents DynamoDB table name
+    Value: !Ref IncidentsTable
+    Export:
+      Name: !Sub outageshield-storage-${Environment}-IncidentsTableName
+
+  IncidentsTableArn:
+    Description: Incidents DynamoDB table ARN
+    Value: !GetAtt IncidentsTable.Arn
+    Export:
+      Name: !Sub outageshield-storage-${Environment}-IncidentsTableArn
+
+  RunbooksTableName:
+    Description: Runbooks DynamoDB table name
+    Value: !Ref RunbooksTable
+    Export:
+      Name: !Sub outageshield-storage-${Environment}-RunbooksTableName
+
+  RunbooksTableArn:
+    Description: Runbooks DynamoDB table ARN
+    Value: !GetAtt RunbooksTable.Arn
+    Export:
+      Name: !Sub outageshield-storage-${Environment}-RunbooksTableArn
+
+  WorkflowStateTableName:
+    Description: Workflow state DynamoDB table name
+    Value: !Ref WorkflowStateTable
+    Export:
+      Name: !Sub outageshield-storage-${Environment}-WorkflowStateTableName
+
+  PostmortemsTableName:
+    Description: Postmortems DynamoDB table name
+    Value: !Ref PostmortemsTable
+    Export:
+      Name: !Sub outageshield-storage-${Environment}-PostmortemsTableName
+
+  OpenSearchEndpoint:
+    Description: OpenSearch Serverless collection endpoint
+    Value: !GetAtt OpenSearchCollection.CollectionEndpoint
+    Export:
+      Name: !Sub outageshield-storage-${Environment}-OpenSearchEndpoint
+
+  OpenSearchArn:
+    Description: OpenSearch Serverless collection ARN
+    Value: !GetAtt OpenSearchCollection.Arn
+    Export:
+      Name: !Sub outageshield-storage-${Environment}-OpenSearchArn
+
+  OpenSearchCollectionId:
+    Description: OpenSearch Serverless collection ID
+    Value: !Ref OpenSearchCollection
+    Export:
+      Name: !Sub outageshield-storage-${Environment}-OpenSearchCollectionId

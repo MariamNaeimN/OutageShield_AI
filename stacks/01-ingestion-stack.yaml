@@ -1,0 +1,238 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OutageShield AI - Ingestion Stack
+  Collects and normalizes operational data from CloudWatch, X-Ray, CloudTrail, and AWS Config.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
+
+  RetentionDays:
+    Type: Number
+    Default: 14
+    Description: CloudWatch log retention in days
+
+Resources:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # EventBridge Event Bus
+  # ─────────────────────────────────────────────────────────────────────────────
+  IngestionEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub outageshield-ingestion-${Environment}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # CloudWatch Alarm Rule → EventBridge
+  # ─────────────────────────────────────────────────────────────────────────────
+  CloudWatchAlarmRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub outageshield-cw-alarms-${Environment}
+      EventBusName: !Ref IngestionEventBus
+      EventPattern:
+        source:
+          - aws.cloudwatch
+        detail-type:
+          - CloudWatch Alarm State Change
+      State: ENABLED
+      Targets:
+        - Id: IngestionLambdaTarget
+          Arn: !GetAtt IngestionLambda.Arn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # CloudTrail Events Rule → EventBridge
+  # ─────────────────────────────────────────────────────────────────────────────
+  CloudTrailEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub outageshield-cloudtrail-${Environment}
+      EventPattern:
+        source:
+          - aws.cloudtrail
+      State: ENABLED
+      Targets:
+        - Id: IngestionLambdaTarget
+          Arn: !GetAtt IngestionLambda.Arn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # AWS Config Change Rule → EventBridge
+  # ─────────────────────────────────────────────────────────────────────────────
+  ConfigChangeRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub outageshield-config-changes-${Environment}
+      EventPattern:
+        source:
+          - aws.config
+        detail-type:
+          - Config Configuration Item Change
+      State: ENABLED
+      Targets:
+        - Id: IngestionLambdaTarget
+          Arn: !GetAtt IngestionLambda.Arn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Ingestion Lambda Function
+  # ─────────────────────────────────────────────────────────────────────────────
+  IngestionLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub outageshield-ingestion-lambda-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: IngestionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:DescribeAlarms
+                  - logs:GetLogEvents
+                  - logs:FilterLogEvents
+                  - xray:GetTraceSummaries
+                  - xray:BatchGetTraces
+                  - config:GetResourceConfigHistory
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - sns:Publish
+                Resource: '*'
+
+  IngestionLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub outageshield-ingestion-${Environment}
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt IngestionLambdaRole.Arn
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          EVENTS_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-EventsTableName
+          NOTIFICATION_TOPIC: !ImportValue
+            Fn::Sub: outageshield-notifications-${Environment}-TopicArn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import hashlib
+          from datetime import datetime, timezone
+
+          dynamodb = boto3.resource('dynamodb')
+          sns = boto3.client('sns')
+
+          def lambda_handler(event, context):
+              """
+              Ingestion Lambda: Normalizes events into common schema,
+              deduplicates, and stores in DynamoDB.
+              """
+              try:
+                  normalized = normalize_event(event)
+                  if normalized and not is_duplicate(normalized):
+                      store_event(normalized)
+                      return {'statusCode': 200, 'body': 'Event ingested'}
+                  return {'statusCode': 200, 'body': 'Event skipped (duplicate or invalid)'}
+              except Exception as e:
+                  print(f"Ingestion error: {e}")
+                  return {'statusCode': 500, 'body': str(e)}
+
+          def normalize_event(event):
+              source = event.get('source', 'unknown')
+              detail = event.get('detail', {})
+              return {
+                  'event_id': generate_event_id(event),
+                  'timestamp': datetime.now(timezone.utc).isoformat(),
+                  'source': source,
+                  'severity': classify_severity(detail),
+                  'service': extract_service(event),
+                  'payload': json.dumps(detail)
+              }
+
+          def generate_event_id(event):
+              content = json.dumps(event, sort_keys=True)
+              return hashlib.sha256(content.encode()).hexdigest()[:32]
+
+          def classify_severity(detail):
+              state = detail.get('state', {}).get('value', '')
+              if state == 'ALARM':
+                  return 'high'
+              elif state == 'OK':
+                  return 'informational'
+              return 'medium'
+
+          def extract_service(event):
+              detail = event.get('detail', {})
+              # Try multiple fields to find service name
+              return (detail.get('resourceId') or
+                      detail.get('requestParameters', {}).get('functionName') or
+                      detail.get('requestParameters', {}).get('service') or
+                      detail.get('configurationItem', {}).get('resourceId') or
+                      event.get('source', 'unknown'))
+
+          def is_duplicate(normalized):
+              import os
+              table = dynamodb.Table(os.environ['EVENTS_TABLE'])
+              try:
+                  resp = table.get_item(Key={'event_id': normalized['event_id']}, ProjectionExpression='event_id')
+                  return 'Item' in resp
+              except Exception:
+                  return False
+
+          def store_event(normalized):
+              import os
+              table = dynamodb.Table(os.environ['EVENTS_TABLE'])
+              table.put_item(Item=normalized)
+
+  IngestionLambdaPermissionEventBridge:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref IngestionLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # CloudWatch Log Group
+  # ─────────────────────────────────────────────────────────────────────────────
+  IngestionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/outageshield-ingestion-${Environment}
+      RetentionInDays: !Ref RetentionDays
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Dead Letter Queue for failed ingestion
+  # ─────────────────────────────────────────────────────────────────────────────
+  IngestionDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub outageshield-ingestion-dlq-${Environment}
+      MessageRetentionPeriod: 1209600  # 14 days
+
+Outputs:
+  IngestionEventBusArn:
+    Description: Ingestion EventBridge Bus ARN
+    Value: !GetAtt IngestionEventBus.Arn
+    Export:
+      Name: !Sub outageshield-ingestion-${Environment}-EventBusArn
+
+  IngestionLambdaArn:
+    Description: Ingestion Lambda ARN
+    Value: !GetAtt IngestionLambda.Arn
+    Export:
+      Name: !Sub outageshield-ingestion-${Environment}-LambdaArn

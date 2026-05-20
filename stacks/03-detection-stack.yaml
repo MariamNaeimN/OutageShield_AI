@@ -1,0 +1,248 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OutageShield AI - Detection Stack
+  Evaluates ingested events against thresholds and generates Outage Signals.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
+
+  RetentionDays:
+    Type: Number
+    Default: 14
+    Description: CloudWatch log retention in days
+
+Resources:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Detection Lambda Role
+  # ─────────────────────────────────────────────────────────────────────────────
+  DetectionLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub outageshield-detection-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DetectionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: outageshield-storage-${Environment}-EventsTableArn
+                  - !Sub
+                    - ${TableArn}/index/*
+                    - TableArn: !ImportValue
+                        Fn::Sub: outageshield-storage-${Environment}-EventsTableArn
+              - Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - cloudwatch:GetMetricData
+                  - cloudwatch:DescribeAlarms
+                  - xray:GetTraceSummaries
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource:
+                  - !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:outageshield-workflow-${Environment}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Detection Lambda Function
+  # ─────────────────────────────────────────────────────────────────────────────
+  DetectionLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub outageshield-detection-${Environment}
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt DetectionLambdaRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          EVENTS_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-EventsTableName
+          OUTAGE_SIGNAL_BUS: !Sub outageshield-signals-${Environment}
+          STATE_MACHINE_ARN: !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:outageshield-workflow-${Environment}
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime, timezone
+          import uuid
+
+          stepfunctions = boto3.client('stepfunctions')
+          STATE_MACHINE_ARN = os.environ['STATE_MACHINE_ARN']
+
+          THRESHOLDS = {'latency_ms': 500, 'error_rate_pct': 5, 'cpu_pct': 85}
+
+          def lambda_handler(event, context):
+              """
+              Detection Engine: Evaluates events against thresholds.
+              When anomaly detected, starts Step Functions workflow automatically.
+              """
+              signal = None
+
+              if is_alarm_event(event):
+                  signal = generate_signal(event, 'metric')
+              elif is_log_error(event):
+                  signal = generate_signal(event, 'log')
+              elif is_latency_anomaly(event):
+                  signal = generate_signal(event, 'trace')
+
+              if signal:
+                  # Start the full incident investigation workflow
+                  start_workflow(signal)
+                  return {'statusCode': 200, 'workflow_started': True, 'signal_id': signal['signal_id']}
+
+              return {'statusCode': 200, 'workflow_started': False}
+
+          def is_alarm_event(event):
+              detail = event.get('detail', {})
+              return detail.get('state', {}).get('value') == 'ALARM'
+
+          def is_log_error(event):
+              detail = event.get('detail', {})
+              message = str(detail.get('message', ''))
+              return any(p in message for p in ['ERROR', 'FATAL', 'OutOfMemory', 'Timeout'])
+
+          def is_latency_anomaly(event):
+              detail = event.get('detail', {})
+              return detail.get('latency_ms', 0) > THRESHOLDS['latency_ms']
+
+          def generate_signal(event, detection_type):
+              detail = event.get('detail', {})
+              # Extract service name from various event formats
+              service = (detail.get('alarmName', '').split('-')[-1] if detail.get('alarmName') else
+                        detail.get('resourceId') or
+                        detail.get('requestParameters', {}).get('functionName') or
+                        detail.get('service') or
+                        'unknown-service')
+              return {
+                  'signal_id': 'INC-' + str(uuid.uuid4())[:8].upper(),
+                  'service': service,
+                  'detection_type': detection_type,
+                  'severity_score': calculate_severity(detail),
+                  'timestamp': datetime.now(timezone.utc).isoformat(),
+                  'auto_remediation_enabled': False,
+                  'source_event_summary': json.dumps(detail, default=str)[:500]
+              }
+
+          def calculate_severity(detail):
+              # ALARM state = severity 4, errors = 3, latency = 3
+              if detail.get('state', {}).get('value') == 'ALARM':
+                  return 4
+              return 3
+
+          def start_workflow(signal):
+              try:
+                  response = stepfunctions.start_execution(
+                      stateMachineArn=STATE_MACHINE_ARN,
+                      name=signal['signal_id'],
+                      input=json.dumps({'signal': signal})
+                  )
+                  print(f"Workflow started: {signal['signal_id']} → {response['executionArn']}")
+              except Exception as e:
+                  print(f"Failed to start workflow: {e}")
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Outage Signal EventBridge Bus
+  # ─────────────────────────────────────────────────────────────────────────────
+  OutageSignalBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub outageshield-signals-${Environment}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Rule: Forward signals to Workflow Orchestrator
+  # ─────────────────────────────────────────────────────────────────────────────
+  SignalToWorkflowRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub outageshield-signal-to-workflow-${Environment}
+      EventBusName: !Ref OutageSignalBus
+      EventPattern:
+        source:
+          - outageshield.detection
+        detail-type:
+          - Outage Signal
+      State: ENABLED
+      Targets:
+        - Id: WorkflowTarget
+          Arn: !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:outageshield-workflow-${Environment}
+          RoleArn: !GetAtt SignalToWorkflowRole.Arn
+
+  SignalToWorkflowRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub outageshield-signal-workflow-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: states:StartExecution
+                Resource: !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:outageshield-workflow-${Environment}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Detection Lambda Permission
+  # ─────────────────────────────────────────────────────────────────────────────
+  DetectionLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DetectionLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # CloudWatch Log Group
+  # ─────────────────────────────────────────────────────────────────────────────
+  DetectionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/outageshield-detection-${Environment}
+      RetentionInDays: !Ref RetentionDays
+
+Outputs:
+  DetectionLambdaArn:
+    Description: Detection Lambda ARN
+    Value: !GetAtt DetectionLambda.Arn
+    Export:
+      Name: !Sub outageshield-detection-${Environment}-LambdaArn
+
+  OutageSignalBusArn:
+    Description: Outage Signal EventBridge Bus ARN
+    Value: !GetAtt OutageSignalBus.Arn
+    Export:
+      Name: !Sub outageshield-detection-${Environment}-SignalBusArn

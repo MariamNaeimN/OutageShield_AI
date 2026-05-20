@@ -1,0 +1,256 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OutageShield AI - Remediation Execution Stack
+  Executes approved remediation actions via AWS Systems Manager.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
+
+  RetentionDays:
+    Type: Number
+    Default: 14
+    Description: CloudWatch log retention in days
+
+Resources:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Remediation Executor Lambda Role
+  # ─────────────────────────────────────────────────────────────────────────────
+  RemediationExecutorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub outageshield-remediation-exec-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RemediationExecutorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommandInvocations
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - autoscaling:UpdateAutoScalingGroup
+                  - autoscaling:DescribeAutoScalingGroups
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - codedeploy:StopDeployment
+                  - codedeploy:CreateDeployment
+                  - codedeploy:GetDeployment
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecs:UpdateService
+                  - ecs:DescribeServices
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: outageshield-storage-${Environment}-IncidentsTableArn
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: outageshield-notifications-${Environment}-TopicArn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Remediation Executor Lambda
+  # ─────────────────────────────────────────────────────────────────────────────
+  RemediationExecutorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub outageshield-remediation-executor-${Environment}
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt RemediationExecutorRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          NOTIFICATION_TOPIC_ARN: !ImportValue
+            Fn::Sub: outageshield-notifications-${Environment}-TopicArn
+          INCIDENTS_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-IncidentsTableName
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import time
+
+          ssm = boto3.client('ssm')
+          sns = boto3.client('sns')
+          dynamodb = boto3.resource('dynamodb')
+
+          NOTIFICATION_TOPIC = os.environ['NOTIFICATION_TOPIC_ARN']
+          EXECUTION_TIMEOUT = 300  # 5 minutes
+
+          def lambda_handler(event, context):
+              """
+              Remediation Executor: Executes approved remediation actions
+              through AWS Systems Manager.
+              """
+              action = event.get('action', {})
+              category = action.get('category', 'manual_intervention')
+              incident_id = event.get('incident_id')
+
+              if category == 'manual_intervention':
+                  return {'statusCode': 200, 'result': 'manual_action_required'}
+
+              try:
+                  result = execute_remediation(action, category)
+                  log_result(incident_id, action, result, 'success')
+                  return {'statusCode': 200, 'result': result}
+              except Exception as e:
+                  log_result(incident_id, action, str(e), 'failed')
+                  notify_failure(incident_id, action, str(e))
+                  return {'statusCode': 500, 'error': str(e)}
+
+          def execute_remediation(action, category):
+              if category == 'rollback':
+                  return execute_rollback(action)
+              elif category == 'scaling':
+                  return execute_scaling(action)
+              elif category == 'configuration_change':
+                  return execute_config_change(action)
+              return {'status': 'unsupported_category'}
+
+          def execute_rollback(action):
+              # Use SSM to run rollback commands
+              response = ssm.send_command(
+                  Targets=action.get('targets', [{'Key': 'tag:Service', 'Values': [action.get('service', '')]}]),
+                  DocumentName='AWS-RunShellScript',
+                  Parameters={'commands': action.get('commands', ['echo "rollback placeholder"'])},
+                  TimeoutSeconds=EXECUTION_TIMEOUT
+              )
+              command_id = response['Command']['CommandId']
+              return wait_for_command(command_id)
+
+          def execute_scaling(action):
+              autoscaling = boto3.client('autoscaling')
+              asg_name = action.get('asg_name', '')
+              desired = action.get('desired_capacity', 2)
+              autoscaling.update_auto_scaling_group(
+                  AutoScalingGroupName=asg_name,
+                  DesiredCapacity=desired
+              )
+              return {'status': 'scaling_initiated', 'desired_capacity': desired}
+
+          def execute_config_change(action):
+              response = ssm.send_command(
+                  Targets=action.get('targets', []),
+                  DocumentName='AWS-RunShellScript',
+                  Parameters={'commands': action.get('commands', [])},
+                  TimeoutSeconds=EXECUTION_TIMEOUT
+              )
+              command_id = response['Command']['CommandId']
+              return wait_for_command(command_id)
+
+          def wait_for_command(command_id):
+              time.sleep(5)
+              response = ssm.list_command_invocations(CommandId=command_id)
+              invocations = response.get('CommandInvocations', [])
+              if invocations:
+                  status = invocations[0].get('Status', 'Unknown')
+                  return {'command_id': command_id, 'status': status}
+              return {'command_id': command_id, 'status': 'pending'}
+
+          def log_result(incident_id, action, result, status):
+              table = dynamodb.Table(os.environ['INCIDENTS_TABLE'])
+              # Update incident with remediation result
+              pass
+
+          def notify_failure(incident_id, action, error):
+              sns.publish(
+                  TopicArn=NOTIFICATION_TOPIC,
+                  Subject=f"[REMEDIATION FAILED] Incident {incident_id}",
+                  Message=f"Action: {action.get('description', 'Unknown')}\nError: {error}"
+              )
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # SSM Documents for common remediation actions
+  # ─────────────────────────────────────────────────────────────────────────────
+  RollbackDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub OutageShield-Rollback-${Environment}
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: OutageShield AI - Service Rollback
+        parameters:
+          ServiceName:
+            type: String
+            description: Name of the service to rollback
+          PreviousVersion:
+            type: String
+            description: Version to rollback to
+        mainSteps:
+          - action: aws:runShellScript
+            name: rollback
+            inputs:
+              runCommand:
+                - echo "Rolling back {{ ServiceName }} to version {{ PreviousVersion }}"
+                - echo "Rollback complete"
+
+  ScaleUpDocument:
+    Type: AWS::SSM::Document
+    Properties:
+      Name: !Sub OutageShield-ScaleUp-${Environment}
+      DocumentType: Command
+      Content:
+        schemaVersion: '2.2'
+        description: OutageShield AI - Service Scale Up
+        parameters:
+          ServiceName:
+            type: String
+            description: Name of the service to scale
+          ScaleFactor:
+            type: String
+            description: Scale factor multiplier
+            default: '2'
+        mainSteps:
+          - action: aws:runShellScript
+            name: scaleUp
+            inputs:
+              runCommand:
+                - echo "Scaling {{ ServiceName }} by factor {{ ScaleFactor }}"
+                - echo "Scale up complete"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # CloudWatch Log Group
+  # ─────────────────────────────────────────────────────────────────────────────
+  RemediationExecutorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/outageshield-remediation-executor-${Environment}
+      RetentionInDays: !Ref RetentionDays
+
+Outputs:
+  RemediationExecutorLambdaArn:
+    Description: Remediation Executor Lambda ARN
+    Value: !GetAtt RemediationExecutorLambda.Arn
+    Export:
+      Name: !Sub outageshield-remediation-${Environment}-ExecutorLambdaArn

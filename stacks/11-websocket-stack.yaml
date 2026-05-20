@@ -1,0 +1,237 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OutageShield AI - WebSocket Real-Time Stack
+  API Gateway WebSocket API + DynamoDB Streams for instant dashboard updates.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+Resources:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Connections Table (tracks connected WebSocket clients)
+  # ─────────────────────────────────────────────────────────────────────────────
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub outageshield-ws-connections-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: connectionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: connectionId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # WebSocket API
+  # ─────────────────────────────────────────────────────────────────────────────
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub outageshield-ws-${Environment}
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: $request.body.action
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Lambda Role
+  # ─────────────────────────────────────────────────────────────────────────────
+  WebSocketLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub outageshield-ws-lambda-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: WebSocketPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                Resource: !GetAtt ConnectionsTable.Arn
+              - Effect: Allow
+                Action:
+                  - execute-api:ManageConnections
+                Resource: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*
+              - Effect: Allow
+                Action:
+                  - dynamodb:DescribeStream
+                  - dynamodb:GetRecords
+                  - dynamodb:GetShardIterator
+                  - dynamodb:ListStreams
+                Resource: '*'
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Connect/Disconnect Lambda
+  # ─────────────────────────────────────────────────────────────────────────────
+  ConnectLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub outageshield-ws-connect-${Environment}
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt WebSocketLambdaRole.Arn
+      Timeout: 10
+      Environment:
+        Variables:
+          CONNECTIONS_TABLE: !Ref ConnectionsTable
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import time
+
+          dynamodb = boto3.resource('dynamodb')
+          table = dynamodb.Table(os.environ['CONNECTIONS_TABLE'])
+
+          def lambda_handler(event, context):
+              connection_id = event['requestContext']['connectionId']
+              event_type = event['requestContext']['eventType']
+
+              if event_type == 'CONNECT':
+                  table.put_item(Item={
+                      'connectionId': connection_id,
+                      'ttl': int(time.time()) + 86400
+                  })
+              elif event_type == 'DISCONNECT':
+                  table.delete_item(Key={'connectionId': connection_id})
+
+              return {'statusCode': 200}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Stream Broadcaster Lambda (pushes DynamoDB changes to all WebSocket clients)
+  # ─────────────────────────────────────────────────────────────────────────────
+  BroadcastLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub outageshield-ws-broadcast-${Environment}
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt WebSocketLambdaRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          CONNECTIONS_TABLE: !Ref ConnectionsTable
+          WS_ENDPOINT: !Sub https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          import json
+
+          dynamodb = boto3.resource('dynamodb')
+          table = dynamodb.Table(os.environ['CONNECTIONS_TABLE'])
+          endpoint = os.environ['WS_ENDPOINT']
+
+          def lambda_handler(event, context):
+              # Get all connected clients
+              connections = table.scan(ProjectionExpression='connectionId')
+              items = connections.get('Items', [])
+
+              if not items:
+                  return {'statusCode': 200}
+
+              # Build message from DynamoDB stream event
+              for record in event.get('Records', []):
+                  if record['eventName'] in ['INSERT', 'MODIFY']:
+                      message = json.dumps({
+                          'type': 'incident_updated',
+                          'payload': {'action': record['eventName']},
+                          'timestamp': record.get('dynamodb', {}).get('ApproximateCreationDateTime', '')
+                      })
+
+                      # Send to all connected clients
+                      apigw = boto3.client('apigatewaymanagementapi', endpoint_url=endpoint)
+                      for item in items:
+                          try:
+                              apigw.post_to_connection(
+                                  ConnectionId=item['connectionId'],
+                                  Data=message.encode()
+                              )
+                          except Exception:
+                              # Remove stale connections
+                              table.delete_item(Key={'connectionId': item['connectionId']})
+
+              return {'statusCode': 200}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # WebSocket Routes
+  # ─────────────────────────────────────────────────────────────────────────────
+  ConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ConnectLambda.Arn}/invocations
+
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $connect
+      Target: !Sub integrations/${ConnectIntegration}
+
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $disconnect
+      Target: !Sub integrations/${ConnectIntegration}
+
+  Deployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn:
+      - ConnectRoute
+      - DisconnectRoute
+    Properties:
+      ApiId: !Ref WebSocketApi
+
+  Stage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      StageName: !Ref Environment
+      DeploymentId: !Ref Deployment
+
+  ConnectLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ConnectLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # DynamoDB Stream → Broadcast Lambda (triggers on incidents table changes)
+  # ─────────────────────────────────────────────────────────────────────────────
+  IncidentsStreamMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/outageshield-incidents-${Environment}/stream/2026-05-20T19:37:28.327
+      FunctionName: !GetAtt BroadcastLambda.Arn
+      StartingPosition: LATEST
+      BatchSize: 10
+
+Outputs:
+  WebSocketUrl:
+    Description: WebSocket URL for real-time updates
+    Value: !Sub wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+    Export:
+      Name: !Sub outageshield-ws-${Environment}-Url

@@ -1,0 +1,235 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OutageShield AI - Orchestration Stack
+  Full 9-step incident investigation workflow with DynamoDB writes at each step.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
+
+Resources:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Step Functions Execution Role
+  # ─────────────────────────────────────────────────────────────────────────────
+  WorkflowExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub outageshield-workflow-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WorkflowPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: outageshield-correlation-${Environment}-LambdaArn
+                  - !ImportValue
+                    Fn::Sub: outageshield-reasoning-${Environment}-RootCauseLambdaArn
+                  - !ImportValue
+                    Fn::Sub: outageshield-reasoning-${Environment}-RemediationLambdaArn
+                  - !ImportValue
+                    Fn::Sub: outageshield-reasoning-${Environment}-ScoringLambdaArn
+                  - !ImportValue
+                    Fn::Sub: outageshield-notifications-${Environment}-LambdaArn
+                  - !ImportValue
+                    Fn::Sub: outageshield-notifications-${Environment}-TicketLambdaArn
+                  - !ImportValue
+                    Fn::Sub: outageshield-reasoning-${Environment}-PostmortemLambdaArn
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: outageshield-storage-${Environment}-IncidentsTableArn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Full 9-Step Incident Investigation State Machine
+  # ─────────────────────────────────────────────────────────────────────────────
+  IncidentWorkflowStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub outageshield-workflow-${Environment}
+      RoleArn: !GetAtt WorkflowExecutionRole.Arn
+      DefinitionString:
+        Fn::Sub:
+          - |
+            {
+              "Comment": "OutageShield AI - Full 9-Step Incident Investigation. Each Lambda writes to DynamoDB. incident_id passed through all steps via $.signal.signal_id.",
+              "StartAt": "Step1_Correlate",
+              "States": {
+                "Step1_Correlate": {
+                  "Type": "Task",
+                  "Comment": "1. Correlate: Gather logs, metrics, traces, deployments, config changes. Creates incident record in DynamoDB.",
+                  "Resource": "${CorrelationArn}",
+                  "TimeoutSeconds": 120,
+                  "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 2}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Fail_Correlate", "ResultPath": "$.error"}],
+                  "ResultPath": "$.step1",
+                  "Next": "Step2_Score"
+                },
+                "Fail_Correlate": {
+                  "Type": "Pass",
+                  "Result": {"status": "failed", "step": "correlate"},
+                  "ResultPath": "$.step1",
+                  "Next": "Step2_Score"
+                },
+
+                "Step2_Score": {
+                  "Type": "Task",
+                  "Comment": "2. Score Incident: Severity, Impact, Affected Users, Business Impact. Writes scores to DynamoDB.",
+                  "Resource": "${ScoringArn}",
+                  "TimeoutSeconds": 60,
+                  "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 10, "MaxAttempts": 5, "BackoffRate": 2.0}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Fail_Score", "ResultPath": "$.error"}],
+                  "ResultPath": "$.step2",
+                  "Next": "Step3_RootCause"
+                },
+                "Fail_Score": {
+                  "Type": "Pass",
+                  "Result": {"status": "failed", "step": "score", "severity_score": 3, "business_impact_score": 5},
+                  "ResultPath": "$.step2",
+                  "Next": "Step3_RootCause"
+                },
+
+                "Step3_RootCause": {
+                  "Type": "Task",
+                  "Comment": "3. Root Cause Analysis: Amazon Bedrock analyzes all context. Writes root cause + confidence to DynamoDB.",
+                  "Resource": "${RootCauseArn}",
+                  "TimeoutSeconds": 120,
+                  "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 10, "MaxAttempts": 5, "BackoffRate": 2.0}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Fail_RootCause", "ResultPath": "$.error"}],
+                  "ResultPath": "$.step3",
+                  "Next": "Step4_Remediation"
+                },
+                "Fail_RootCause": {
+                  "Type": "Pass",
+                  "Result": {"status": "failed", "step": "root_cause"},
+                  "ResultPath": "$.step3",
+                  "Next": "Step4_Remediation"
+                },
+
+                "Step4_Remediation": {
+                  "Type": "Task",
+                  "Comment": "4. Recommend Remediation: Ranked options with confidence, risk, ETA. Writes recommendations to DynamoDB.",
+                  "Resource": "${RemediationArn}",
+                  "TimeoutSeconds": 120,
+                  "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 10, "MaxAttempts": 5, "BackoffRate": 2.0}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Fail_Remediation", "ResultPath": "$.error"}],
+                  "ResultPath": "$.step4",
+                  "Next": "Step5_CheckApproval"
+                },
+                "Fail_Remediation": {
+                  "Type": "Pass",
+                  "Result": {"status": "failed", "step": "remediation"},
+                  "ResultPath": "$.step4",
+                  "Next": "Step5_CheckApproval"
+                },
+
+                "Step5_CheckApproval": {
+                  "Type": "Choice",
+                  "Comment": "5. Check if auto-remediation enabled. If yes, workflow would pause for human approval (waitForTaskToken in production). For demo, skip to ticket.",
+                  "Choices": [
+                    {
+                      "Variable": "$.signal.auto_remediation_enabled",
+                      "BooleanEquals": true,
+                      "Next": "Step5_AwaitApproval"
+                    }
+                  ],
+                  "Default": "Step7_CreateTicket"
+                },
+
+                "Step5_AwaitApproval": {
+                  "Type": "Pass",
+                  "Comment": "5. Human Approval Gate: In production uses .waitForTaskToken to pause indefinitely. For demo, auto-approves and continues.",
+                  "Result": {"decision": "auto_approved_demo", "status": "approved"},
+                  "ResultPath": "$.step5",
+                  "Next": "Step6_Execute"
+                },
+
+                "Step6_Execute": {
+                  "Type": "Pass",
+                  "Comment": "6. Execute Remediation: In production calls Systems Manager. For demo, marks as executed.",
+                  "Result": {"status": "executed", "action": "rollback"},
+                  "ResultPath": "$.step6",
+                  "Next": "Step7_CreateTicket"
+                },
+
+                "Step7_CreateTicket": {
+                  "Type": "Task",
+                  "Comment": "7. Create Ticket: Jira/ServiceNow. Writes ticket_id, ticket_status, ticket_url to DynamoDB.",
+                  "Resource": "${TicketArn}",
+                  "TimeoutSeconds": 60,
+                  "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 10, "MaxAttempts": 3}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Step8_Notify", "ResultPath": "$.ticket_error"}],
+                  "ResultPath": "$.step7",
+                  "Next": "Step8_Notify"
+                },
+
+                "Step8_Notify": {
+                  "Type": "Task",
+                  "Comment": "8. Notify Team: SNS Alerts (Slack, PagerDuty, Email). Writes notification records to DynamoDB.",
+                  "Resource": "${NotificationArn}",
+                  "TimeoutSeconds": 30,
+                  "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 3}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Step9_Postmortem", "ResultPath": "$.notify_error"}],
+                  "ResultPath": "$.step8",
+                  "Next": "Step9_Postmortem"
+                },
+
+                "Step9_Postmortem": {
+                  "Type": "Task",
+                  "Comment": "9. Generate Postmortem: AI Summary & Prevention Steps. Writes to postmortems table.",
+                  "Resource": "${PostmortemArn}",
+                  "TimeoutSeconds": 120,
+                  "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 10, "MaxAttempts": 5, "BackoffRate": 2.0}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Step10_Done", "ResultPath": "$.postmortem_error"}],
+                  "ResultPath": "$.step9",
+                  "Next": "Step10_Done"
+                },
+
+                "Step10_Done": {
+                  "Type": "Pass",
+                  "Comment": "10. Workflow Complete.",
+                  "Result": {"workflow_status": "completed"},
+                  "ResultPath": "$.step10",
+                  "End": true
+                }
+              }
+            }
+          - CorrelationArn: !ImportValue
+              Fn::Sub: outageshield-correlation-${Environment}-LambdaArn
+            ScoringArn: !ImportValue
+              Fn::Sub: outageshield-reasoning-${Environment}-ScoringLambdaArn
+            RootCauseArn: !ImportValue
+              Fn::Sub: outageshield-reasoning-${Environment}-RootCauseLambdaArn
+            RemediationArn: !ImportValue
+              Fn::Sub: outageshield-reasoning-${Environment}-RemediationLambdaArn
+            TicketArn: !ImportValue
+              Fn::Sub: outageshield-notifications-${Environment}-TicketLambdaArn
+            NotificationArn: !ImportValue
+              Fn::Sub: outageshield-notifications-${Environment}-LambdaArn
+            PostmortemArn: !ImportValue
+              Fn::Sub: outageshield-reasoning-${Environment}-PostmortemLambdaArn
+
+Outputs:
+  StateMachineArn:
+    Description: Incident Workflow State Machine ARN
+    Value: !GetAtt IncidentWorkflowStateMachine.Arn
+    Export:
+      Name: !Sub outageshield-orchestration-${Environment}-StateMachineArn

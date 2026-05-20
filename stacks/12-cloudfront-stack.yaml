@@ -1,0 +1,117 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OutageShield AI - CloudFront Stack
+  S3 bucket for static UI hosting + CloudFront distribution with SPA routing.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
+
+Resources:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # S3 Bucket for UI static files
+  # ─────────────────────────────────────────────────────────────────────────────
+  UIBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub outageshield-ui-${Environment}
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        IgnorePublicAcls: false
+        BlockPublicPolicy: false
+        RestrictPublicBuckets: false
+
+  UIBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref UIBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: PublicReadGetObject
+            Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub arn:aws:s3:::${UIBucket}/*
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # CloudFront Distribution
+  # ─────────────────────────────────────────────────────────────────────────────
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Sub OutageShield AI Dashboard - ${Environment}
+        Enabled: true
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_100
+        HttpVersion: http2and3
+
+        Origins:
+          - Id: !Sub s3-outageshield-ui-${Environment}
+            DomainName: !Sub outageshield-ui-${Environment}.s3-website-${AWS::Region}.amazonaws.com
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: http-only
+
+        DefaultCacheBehavior:
+          TargetOriginId: !Sub s3-outageshield-ui-${Environment}
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          MinTTL: 0
+          DefaultTTL: 86400
+          MaxTTL: 31536000
+
+        # SPA routing — return index.html for 404s
+        CustomErrorResponses:
+          - ErrorCode: 404
+            ResponsePagePath: /index.html
+            ResponseCode: 200
+            ErrorCachingMinTTL: 0
+          - ErrorCode: 403
+            ResponsePagePath: /index.html
+            ResponseCode: 200
+            ErrorCachingMinTTL: 0
+
+Outputs:
+  UIBucketName:
+    Description: S3 bucket name for UI files
+    Value: !Ref UIBucket
+    Export:
+      Name: !Sub outageshield-cloudfront-${Environment}-BucketName
+
+  CloudFrontDomainName:
+    Description: CloudFront distribution domain name
+    Value: !GetAtt CloudFrontDistribution.DomainName
+    Export:
+      Name: !Sub outageshield-cloudfront-${Environment}-DomainName
+
+  CloudFrontDistributionId:
+    Description: CloudFront distribution ID
+    Value: !Ref CloudFrontDistribution
+    Export:
+      Name: !Sub outageshield-cloudfront-${Environment}-DistributionId
+
+  CloudFrontURL:
+    Description: Full CloudFront URL
+    Value: !Sub https://${CloudFrontDistribution.DomainName}
+    Export:
+      Name: !Sub outageshield-cloudfront-${Environment}-URL

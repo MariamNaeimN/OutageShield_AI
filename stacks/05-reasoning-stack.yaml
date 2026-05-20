@@ -1,0 +1,570 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OutageShield AI - Reasoning Stack
+  Amazon Bedrock Agent for root-cause analysis, remediation recommendations,
+  severity scoring, and postmortem generation.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment
+
+  BedrockModelId:
+    Type: String
+    Default: anthropic.claude-3-haiku-20240307-v1:0
+    Description: Bedrock foundation model ID
+
+  RetentionDays:
+    Type: Number
+    Default: 14
+    Description: CloudWatch log retention in days
+
+Resources:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Bedrock Agent IAM Role
+  # ─────────────────────────────────────────────────────────────────────────────
+  BedrockAgentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub outageshield-bedrock-agent-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BedrockAgentPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: outageshield-storage-${Environment}-IncidentsTableArn
+                  - !Sub
+                    - ${TableArn}/index/*
+                    - TableArn: !ImportValue
+                        Fn::Sub: outageshield-storage-${Environment}-IncidentsTableArn
+                  - !ImportValue
+                    Fn::Sub: outageshield-storage-${Environment}-RunbooksTableArn
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: outageshield-storage-${Environment}-OpenSearchArn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Root Cause Analysis Lambda
+  # ─────────────────────────────────────────────────────────────────────────────
+  RootCauseLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub outageshield-rootcause-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RootCausePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: '*'
+
+  RootCauseLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub outageshield-rootcause-${Environment}
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt RootCauseLambdaRole.Arn
+      Timeout: 90
+      MemorySize: 1024
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          MODEL_ID: !Ref BedrockModelId
+          INCIDENTS_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-IncidentsTableName
+          RUNBOOKS_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-RunbooksTableName
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          bedrock = boto3.client('bedrock-runtime')
+          dynamodb = boto3.resource('dynamodb')
+
+          MODEL_ID = os.environ['MODEL_ID']
+
+          def lambda_handler(event, context):
+              incident_context = event.get('incident_context', event.get('signal', {}))
+              incident_id = incident_context.get('signal_id', incident_context.get('signal', {}).get('signal_id', ''))
+              prompt = build_rca_prompt(incident_context)
+              response = invoke_bedrock(prompt)
+              root_causes = parse_root_causes(response)
+              for cause in root_causes:
+                  if cause.get('confidence', 0) > 80:
+                      cause['runbooks'] = []
+
+              # Store root cause in DynamoDB
+              if incident_id and root_causes:
+                  store_root_cause(incident_id, root_causes)
+
+              return {
+                  'statusCode': 200,
+                  'root_causes': root_causes,
+                  'incident_context_id': incident_context.get('context_id', 'unknown')
+              }
+
+          def store_root_cause(incident_id, root_causes):
+              table = dynamodb.Table(os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev'))
+              top = root_causes[0] if root_causes else {}
+              try:
+                  table.update_item(
+                      Key={'incident_id': incident_id},
+                      UpdateExpression='SET root_cause = :rc, confidence = :c, recommendations_raw = :recs, workflow_step = :ws',
+                      ExpressionAttributeValues={
+                          ':rc': top.get('description', 'Unknown'),
+                          ':c': int(top.get('confidence', 50)),
+                          ':recs': json.dumps(root_causes, default=str),
+                          ':ws': 'root_cause_analysis'
+                      }
+                  )
+              except Exception as e:
+                  print(f"Store RCA failed: {e}")
+
+          def build_rca_prompt(context):
+              return f"""Analyze this incident and identify probable root causes. Return ONLY a JSON array.
+              Each item must have: "description" (string), "confidence" (integer 0-100), "evidence" (string).
+              Context: {json.dumps(context, default=str)[:2000]}
+              Return JSON array only, no other text."""
+
+          def invoke_bedrock(prompt):
+              response = bedrock.invoke_model(
+                  modelId=MODEL_ID,
+                  body=json.dumps({
+                      'anthropic_version': 'bedrock-2023-05-31',
+                      'max_tokens': 2048,
+                      'messages': [{'role': 'user', 'content': prompt}]
+                  })
+              )
+              body = json.loads(response['body'].read())
+              return body['content'][0]['text']
+
+          def parse_root_causes(response_text):
+              try:
+                  text = response_text.strip()
+                  if text.startswith('['):
+                      return json.loads(text)
+                  start = text.find('[')
+                  end = text.rfind(']') + 1
+                  if start >= 0 and end > start:
+                      return json.loads(text[start:end])
+                  return [{'description': text, 'confidence': 50, 'evidence': 'Bedrock response'}]
+              except Exception:
+                  return [{'description': response_text[:200], 'confidence': 50, 'evidence': 'Parse error'}]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Remediation Recommendation Lambda
+  # ─────────────────────────────────────────────────────────────────────────────
+  RemediationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub outageshield-remediation-rec-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: RemediationRecPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub arn:aws:bedrock:${AWS::Region}::foundation-model/${BedrockModelId}
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                Resource: '*'
+
+  RemediationRecommendLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub outageshield-remediation-recommend-${Environment}
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt RemediationLambdaRole.Arn
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          MODEL_ID: !Ref BedrockModelId
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          bedrock = boto3.client('bedrock-runtime')
+          MODEL_ID = os.environ['MODEL_ID']
+
+          def lambda_handler(event, context):
+              """
+              Reasoning Agent - Remediation Recommendations:
+              Generates ranked remediation actions based on root causes.
+              """
+              root_causes = event.get('root_causes', [])
+              incident_context = event.get('incident_context', {})
+
+              prompt = build_remediation_prompt(root_causes, incident_context)
+              response = invoke_bedrock(prompt)
+              recommendations = parse_recommendations(response)
+
+              return {
+                  'statusCode': 200,
+                  'recommendations': recommendations
+              }
+
+          def build_remediation_prompt(root_causes, context):
+              return f"""Based on the following root causes, generate remediation recommendations.
+              For each recommendation provide:
+              1. Action category (rollback, scaling, configuration_change, manual_intervention)
+              2. Description
+              3. Effectiveness score (1-5)
+              4. Risk level (low, medium, high)
+              5. Estimated time to resolution in minutes
+
+              Root Causes: {json.dumps(root_causes)}
+              Service: {context.get('service')}
+
+              Return as JSON array ranked by effectiveness."""
+
+          def invoke_bedrock(prompt):
+              response = bedrock.invoke_model(
+                  modelId=MODEL_ID,
+                  body=json.dumps({
+                      'anthropic_version': 'bedrock-2023-05-31',
+                      'max_tokens': 4096,
+                      'messages': [{'role': 'user', 'content': prompt}]
+                  })
+              )
+              body = json.loads(response['body'].read())
+              return body['content'][0]['text']
+
+          def parse_recommendations(response_text):
+              try:
+                  recs = json.loads(response_text)
+                  return sorted(recs, key=lambda x: x.get('effectiveness', 0), reverse=True)
+              except json.JSONDecodeError:
+                  return [{'category': 'manual_intervention', 'description': response_text,
+                           'effectiveness': 3, 'risk': 'medium', 'estimated_ttr_minutes': 30}]
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Severity & Impact Scoring Lambda
+  # ─────────────────────────────────────────────────────────────────────────────
+  ScoringLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub outageshield-scoring-${Environment}
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt RootCauseLambdaRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          MODEL_ID: !Ref BedrockModelId
+          INCIDENTS_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-IncidentsTableName
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          bedrock = boto3.client('bedrock-runtime')
+          dynamodb = boto3.resource('dynamodb')
+          MODEL_ID = os.environ['MODEL_ID']
+          INCIDENTS_TABLE = os.environ['INCIDENTS_TABLE']
+
+          def lambda_handler(event, context):
+              incident_context = event.get('incident_context', event.get('signal', {}))
+              incident_id = incident_context.get('signal_id', incident_context.get('signal', {}).get('signal_id', ''))
+              service = incident_context.get('service', 'unknown')
+
+              prompt = f"""You are an SRE AI agent evaluating an incident for service "{service}".
+              Evaluate this incident and return ONLY a JSON object with these fields:
+              - severity_score: integer 1-5 (1=low, 5=critical)
+              - business_impact_score: integer 1-10 (10=catastrophic)
+              - affected_users: integer estimate of affected users
+              - revenue_at_risk: string like "$X,XXX/hour"
+              - sla_status: one of "OK", "Warning", "At Risk", "Breached"
+              - service_risk_score: integer 0-100 representing overall risk level for this service (consider: blast radius, dependencies, data sensitivity, customer-facing nature, recovery complexity)
+
+              Context: {json.dumps(incident_context, default=str)[:1500]}
+              Return JSON only, no other text."""
+
+              try:
+                  response = bedrock.invoke_model(
+                      modelId=MODEL_ID,
+                      body=json.dumps({
+                          'anthropic_version': 'bedrock-2023-05-31',
+                          'max_tokens': 512,
+                          'messages': [{'role': 'user', 'content': prompt}]
+                      })
+                  )
+                  body = json.loads(response['body'].read())
+                  text = body['content'][0]['text']
+                  start = text.find('{')
+                  end = text.rfind('}') + 1
+                  result = json.loads(text[start:end]) if start >= 0 else {}
+                  scores = {
+                      'severity_score': int(result.get('severity_score', 3)),
+                      'business_impact_score': int(result.get('business_impact_score', 5)),
+                      'affected_users': int(result.get('affected_users', 0)),
+                      'revenue_at_risk': result.get('revenue_at_risk', 'Unknown'),
+                      'sla_status': result.get('sla_status', 'Unknown'),
+                      'service_risk_score': int(result.get('service_risk_score', 50))
+                  }
+              except Exception as e:
+                  print(f"Scoring error: {e}")
+                  scores = {'severity_score': 3, 'business_impact_score': 5, 'affected_users': 0, 'revenue_at_risk': 'Unknown', 'sla_status': 'Unknown', 'service_risk_score': 50}
+
+              # Store scores in incidents table
+              if incident_id:
+                  store_scores(incident_id, scores)
+
+              return {'statusCode': 200, **scores, 'partial': False}
+
+          def store_scores(incident_id, scores):
+              table = dynamodb.Table(INCIDENTS_TABLE)
+              try:
+                  table.update_item(
+                      Key={'incident_id': incident_id},
+                      UpdateExpression='SET severity_score = :s, business_impact_score = :b, affected_users = :au, revenue_at_risk = :r, sla_status = :sla, service_risk_score = :srs, workflow_step = :ws',
+                      ExpressionAttributeValues={
+                          ':s': scores['severity_score'],
+                          ':b': scores['business_impact_score'],
+                          ':au': scores['affected_users'],
+                          ':r': scores['revenue_at_risk'],
+                          ':sla': scores['sla_status'],
+                          ':srs': scores['service_risk_score'],
+                          ':ws': 'scoring'
+                      }
+                  )
+              except Exception as e:
+                  print(f"Store scores failed: {e}")
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Postmortem Generation Lambda
+  # ─────────────────────────────────────────────────────────────────────────────
+  PostmortemLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub outageshield-postmortem-${Environment}
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt RootCauseLambdaRole.Arn
+      Timeout: 120
+      MemorySize: 1024
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          MODEL_ID: !Ref BedrockModelId
+          POSTMORTEMS_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-PostmortemsTableName
+          INCIDENTS_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-IncidentsTableName
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import uuid
+          from datetime import datetime, timezone
+
+          bedrock = boto3.client('bedrock-runtime')
+          dynamodb = boto3.resource('dynamodb')
+          MODEL_ID = os.environ['MODEL_ID']
+
+          def lambda_handler(event, context):
+              # Extract from nested Step Functions state
+              signal = event.get('signal', {})
+              incident_id = event.get('incident_id') or signal.get('signal_id', '')
+              service = event.get('service') or signal.get('service', 'unknown')
+              incident_context = event.get('step1', {}).get('incident_context', {})
+
+              # Generate postmortem via Bedrock
+              prompt = f"""Generate a brief incident postmortem for service "{service}". Include:
+              1. "summary" - what happened (2 sentences)
+              2. "root_cause" - likely cause
+              3. "duration" - estimated duration
+              4. "prevention" - array of 3 prevention steps
+              5. "impact" - who was affected
+              Return ONLY JSON object."""
+
+              try:
+                  text = invoke_bedrock(prompt)
+                  start = text.find('{')
+                  end = text.rfind('}') + 1
+                  postmortem_data = json.loads(text[start:end]) if start >= 0 else {'summary': text[:200]}
+              except Exception as e:
+                  print(f"Postmortem generation failed: {e}")
+                  postmortem_data = {'summary': f'Incident on {service}', 'root_cause': 'Analysis pending', 'prevention': ['Review pending']}
+
+              # Store in postmortems table
+              store_postmortem(incident_id, service, postmortem_data)
+
+              return {'statusCode': 200, 'postmortem': postmortem_data}
+
+          def store_postmortem(incident_id, service, data):
+              if not incident_id:
+                  return
+              table = dynamodb.Table(os.environ['POSTMORTEMS_TABLE'])
+              try:
+                  table.put_item(Item={
+                      'postmortem_id': 'PM-' + str(uuid.uuid4())[:8],
+                      'incident_id': incident_id,
+                      'service': service,
+                      'title': f"Postmortem: {service} incident",
+                      'summary': data.get('summary', ''),
+                      'root_cause': data.get('root_cause', ''),
+                      'duration': data.get('duration', 'Unknown'),
+                      'prevention': json.dumps(data.get('prevention', [])),
+                      'impact_summary': data.get('impact', ''),
+                      'created_at': datetime.now(timezone.utc).isoformat(),
+                      'status': 'GENERATED'
+                  })
+                  print(f"Postmortem stored for {incident_id}")
+              except Exception as e:
+                  print(f"Store postmortem failed: {e}")
+              # Also update incident status
+              try:
+                  inc_table = dynamodb.Table(os.environ['INCIDENTS_TABLE'])
+                  inc_table.update_item(
+                      Key={'incident_id': incident_id},
+                      UpdateExpression='SET workflow_step = :ws, postmortem_generated = :pg',
+                      ExpressionAttributeValues={':ws': 'postmortem', ':pg': True}
+                  )
+              except Exception:
+                  pass
+
+          def invoke_bedrock(prompt):
+              response = bedrock.invoke_model(
+                  modelId=MODEL_ID,
+                  body=json.dumps({
+                      'anthropic_version': 'bedrock-2023-05-31',
+                      'max_tokens': 8192,
+                      'messages': [{'role': 'user', 'content': prompt}]
+                  })
+              )
+              body = json.loads(response['body'].read())
+              return body['content'][0]['text']
+
+          def store_postmortem(incident_id, summary, postmortem):
+              table = dynamodb.Table(os.environ['POSTMORTEMS_TABLE'])
+              table.put_item(Item={
+                  'postmortem_id': str(uuid.uuid4()),
+                  'incident_id': incident_id,
+                  'summary': summary,
+                  'postmortem': postmortem,
+                  'created_at': datetime.now(timezone.utc).isoformat()
+              })
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # CloudWatch Log Groups
+  # ─────────────────────────────────────────────────────────────────────────────
+  RootCauseLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/outageshield-rootcause-${Environment}
+      RetentionInDays: !Ref RetentionDays
+
+  RemediationRecLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/outageshield-remediation-recommend-${Environment}
+      RetentionInDays: !Ref RetentionDays
+
+  ScoringLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/outageshield-scoring-${Environment}
+      RetentionInDays: !Ref RetentionDays
+
+  PostmortemLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/outageshield-postmortem-${Environment}
+      RetentionInDays: !Ref RetentionDays
+
+Outputs:
+  RootCauseLambdaArn:
+    Description: Root Cause Analysis Lambda ARN
+    Value: !GetAtt RootCauseLambda.Arn
+    Export:
+      Name: !Sub outageshield-reasoning-${Environment}-RootCauseLambdaArn
+
+  RemediationRecommendLambdaArn:
+    Description: Remediation Recommendation Lambda ARN
+    Value: !GetAtt RemediationRecommendLambda.Arn
+    Export:
+      Name: !Sub outageshield-reasoning-${Environment}-RemediationLambdaArn
+
+  ScoringLambdaArn:
+    Description: Scoring Lambda ARN
+    Value: !GetAtt ScoringLambda.Arn
+    Export:
+      Name: !Sub outageshield-reasoning-${Environment}-ScoringLambdaArn
+
+  PostmortemLambdaArn:
+    Description: Postmortem Lambda ARN
+    Value: !GetAtt PostmortemLambda.Arn
+    Export:
+      Name: !Sub outageshield-reasoning-${Environment}-PostmortemLambdaArn

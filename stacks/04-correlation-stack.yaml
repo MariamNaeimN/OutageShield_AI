@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OutageShield AI - Correlation Stack
+  Correlates outage signals with deployment events, config changes, and incident history.
+  Writes incident record + workflow state to DynamoDB.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+  RetentionDays:
+    Type: Number
+    Default: 14
+
+Resources:
+
+  CorrelationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub outageshield-correlation-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CorrelationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                Resource: '*'
+
+  CorrelationLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub outageshield-correlation-${Environment}
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt CorrelationLambdaRole.Arn
+      Timeout: 60
+      MemorySize: 1024
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          INCIDENTS_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-IncidentsTableName
+          EVENTS_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-EventsTableName
+          WORKFLOW_STATE_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-WorkflowStateTableName
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import uuid
+          from datetime import datetime, timezone
+
+          dynamodb = boto3.resource('dynamodb')
+
+          def lambda_handler(event, context):
+              signal = event.get('signal', event)
+              service = signal.get('service', 'unknown')
+              incident_id = signal.get('signal_id', str(uuid.uuid4())[:8])
+              now = datetime.now(timezone.utc).isoformat()
+
+              incident_context = {
+                  'context_id': str(uuid.uuid4()),
+                  'signal': signal,
+                  'service': service,
+                  'timestamp': now,
+                  'deployments': [],
+                  'config_changes': [],
+                  'past_incidents': [],
+                  'related_logs': [],
+                  'unavailable_sources': []
+              }
+
+              # Store incident in DynamoDB
+              inc_table = dynamodb.Table(os.environ['INCIDENTS_TABLE'])
+              inc_table.put_item(Item={
+                  'incident_id': incident_id,
+                  'service': service,
+                  'title': f"Outage signal on {service}",
+                  'severity_score': int(signal.get('severity_score', 3)),
+                  'business_impact_score': 5,
+                  'status': 'Investigating',
+                  'created_at': now,
+                  'updated_at': now,
+                  'workflow_step': 'correlation',
+                  'context': json.dumps(incident_context, default=str)
+              })
+
+              # Store workflow state
+              wf_table = dynamodb.Table(os.environ['WORKFLOW_STATE_TABLE'])
+              wf_table.put_item(Item={
+                  'workflow_id': 'wf-' + incident_id,
+                  'incident_id': incident_id,
+                  'current_step': 'correlation',
+                  'status': 'running',
+                  'started_at': now,
+                  'correlation_completed_at': now
+              })
+
+              return {'statusCode': 200, 'incident_context': incident_context}
+
+  CorrelationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/outageshield-correlation-${Environment}
+      RetentionInDays: !Ref RetentionDays
+
+Outputs:
+  CorrelationLambdaArn:
+    Description: Correlation Lambda ARN
+    Value: !GetAtt CorrelationLambda.Arn
+    Export:
+      Name: !Sub outageshield-correlation-${Environment}-LambdaArn

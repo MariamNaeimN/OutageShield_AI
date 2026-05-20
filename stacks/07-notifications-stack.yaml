@@ -1,0 +1,332 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OutageShield AI - Notifications & Ticketing Stack
+  SNS notifications + Ticket creation. Both store content in DynamoDB.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+  OpsEmailEndpoint:
+    Type: String
+    Default: ops-team@example.com
+  RetentionDays:
+    Type: Number
+    Default: 14
+
+Resources:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # SNS Topics
+  # ─────────────────────────────────────────────────────────────────────────────
+  IncidentAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub outageshield-alerts-${Environment}
+
+  EscalationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub outageshield-escalation-${Environment}
+
+  ApprovalRequestTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub outageshield-approvals-${Environment}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Notification Lambda
+  # ─────────────────────────────────────────────────────────────────────────────
+  NotificationLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub outageshield-notification-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: NotificationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Ref IncidentAlertTopic
+                  - !Ref EscalationTopic
+                  - !Ref ApprovalRequestTopic
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                Resource: '*'
+
+  NotificationLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub outageshield-notification-${Environment}
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt NotificationLambdaRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          ALERT_TOPIC_ARN: !Ref IncidentAlertTopic
+          ESCALATION_TOPIC_ARN: !Ref EscalationTopic
+          INCIDENTS_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-IncidentsTableName
+          WORKFLOW_STATE_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-WorkflowStateTableName
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import uuid
+          from datetime import datetime, timezone
+
+          sns = boto3.client('sns')
+          dynamodb = boto3.resource('dynamodb')
+
+          ALERT_TOPIC = os.environ.get('ALERT_TOPIC_ARN', '')
+          ESCALATION_TOPIC = os.environ.get('ESCALATION_TOPIC_ARN', '')
+          INCIDENTS_TABLE = os.environ['INCIDENTS_TABLE']
+          WORKFLOW_STATE_TABLE = os.environ['WORKFLOW_STATE_TABLE']
+
+          def lambda_handler(event, context):
+              signal = event.get('signal', {})
+              incident_id = event.get('incident_id') or signal.get('signal_id', '')
+              severity = event.get('severity_score') or signal.get('severity_score', 3)
+              service = event.get('service') or signal.get('service', 'unknown')
+              now = datetime.now(timezone.utc).isoformat()
+
+              # Determine notification type and channel
+              if int(severity) >= 4:
+                  notif_type = 'escalation'
+                  channel = 'PagerDuty + Slack'
+                  topic = ESCALATION_TOPIC
+                  subject = f"[ESCALATION] Sev {severity}: {service}"
+              else:
+                  notif_type = 'alert'
+                  channel = 'Slack + Email'
+                  topic = ALERT_TOPIC
+                  subject = f"[OutageShield] {service} incident"
+
+              # Build SNS message content
+              sns_message = json.dumps({
+                  'incident_id': incident_id,
+                  'service': service,
+                  'severity': int(severity),
+                  'type': notif_type,
+                  'timestamp': now,
+                  'message': f"Incident {incident_id} detected on {service}. Severity: {severity}. Investigating."
+              }, indent=2)
+
+              # Send SNS
+              try:
+                  if topic:
+                      sns.publish(TopicArn=topic, Subject=subject, Message=sns_message)
+              except Exception as e:
+                  print(f"SNS failed: {e}")
+
+              # Store notification content in incidents table
+              notification_record = json.dumps({
+                  'id': 'notif-' + str(uuid.uuid4())[:8],
+                  'type': notif_type,
+                  'channel': channel,
+                  'status': 'delivered',
+                  'sent_at': now,
+                  'recipient': 'sre-oncall@shopsphere.com',
+                  'subject': subject,
+                  'message': sns_message
+              })
+
+              if incident_id:
+                  table = dynamodb.Table(INCIDENTS_TABLE)
+                  try:
+                      table.update_item(
+                          Key={'incident_id': incident_id},
+                          UpdateExpression='SET notifications = :n, notification_sent_at = :t, workflow_step = :ws',
+                          ExpressionAttributeValues={
+                              ':n': notification_record,
+                              ':t': now,
+                              ':ws': 'notified'
+                          }
+                      )
+                  except Exception as e:
+                      print(f"Store notification failed: {e}")
+
+                  # Update workflow state
+                  try:
+                      wf_table = dynamodb.Table(WORKFLOW_STATE_TABLE)
+                      wf_table.update_item(
+                          Key={'workflow_id': 'wf-' + incident_id},
+                          UpdateExpression='SET current_step = :s, notification_completed_at = :t',
+                          ExpressionAttributeValues={':s': 'notified', ':t': now}
+                      )
+                  except Exception as e:
+                      print(f"Update workflow failed: {e}")
+
+              return {'statusCode': 200, 'action': notif_type + '_sent', 'channel': channel}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Ticket Integrator Lambda
+  # ─────────────────────────────────────────────────────────────────────────────
+  TicketIntegratorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub outageshield-ticket-integrator-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: TicketPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                Resource: '*'
+
+  TicketIntegratorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub outageshield-ticket-integrator-${Environment}
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt TicketIntegratorRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          INCIDENTS_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-IncidentsTableName
+          WORKFLOW_STATE_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-WorkflowStateTableName
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import uuid
+          from datetime import datetime, timezone
+
+          dynamodb = boto3.resource('dynamodb')
+          INCIDENTS_TABLE = os.environ['INCIDENTS_TABLE']
+          WORKFLOW_STATE_TABLE = os.environ['WORKFLOW_STATE_TABLE']
+
+          def lambda_handler(event, context):
+              signal = event.get('signal', {})
+              incident_id = event.get('incident_id') or signal.get('signal_id', '')
+              severity = int(event.get('severity_score') or signal.get('severity_score', 0))
+              service = event.get('service') or signal.get('service', 'unknown')
+              now = datetime.now(timezone.utc).isoformat()
+
+              if severity >= 3 and incident_id:
+                  ticket_id = f"OPS-{abs(hash(incident_id)) % 9000 + 1000}"
+                  ticket_url = f"https://shopsphere.atlassian.net/browse/{ticket_id}"
+
+                  # Build ticket content
+                  ticket_content = json.dumps({
+                      'ticket_id': ticket_id,
+                      'system': 'Jira',
+                      'project': 'OPS',
+                      'status': 'Open',
+                      'priority': 'Critical' if severity >= 4 else 'High',
+                      'url': ticket_url,
+                      'created_at': now,
+                      'summary': f"[OutageShield] Incident {incident_id} on {service}",
+                      'description': f"Severity: {severity}\\nService: {service}\\nDetected: {now}\\nStatus: Investigating"
+                  })
+
+                  # Store ticket in incidents table
+                  table = dynamodb.Table(INCIDENTS_TABLE)
+                  try:
+                      table.update_item(
+                          Key={'incident_id': incident_id},
+                          UpdateExpression='SET ticket_id = :tid, ticket_system = :ts, ticket_status = :tst, ticket_url = :tu, ticket_content = :tc, ticket_created_at = :tca, workflow_step = :ws',
+                          ExpressionAttributeValues={
+                              ':tid': ticket_id,
+                              ':ts': 'Jira',
+                              ':tst': 'Open',
+                              ':tu': ticket_url,
+                              ':tc': ticket_content,
+                              ':tca': now,
+                              ':ws': 'ticket_created'
+                          }
+                      )
+                      print(f"Ticket {ticket_id} stored for {incident_id}")
+                  except Exception as e:
+                      print(f"Store ticket failed: {e}")
+
+                  # Update workflow state
+                  try:
+                      wf_table = dynamodb.Table(WORKFLOW_STATE_TABLE)
+                      wf_table.update_item(
+                          Key={'workflow_id': 'wf-' + incident_id},
+                          UpdateExpression='SET current_step = :s, ticket_created_at = :t',
+                          ExpressionAttributeValues={':s': 'ticket_created', ':t': now}
+                      )
+                  except Exception as e:
+                      print(f"Update workflow failed: {e}")
+
+                  return {'statusCode': 200, 'ticket_id': ticket_id, 'system': 'Jira', 'status': 'Open'}
+
+              return {'statusCode': 200, 'action': 'skipped', 'reason': f'severity={severity}'}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Log Groups
+  # ─────────────────────────────────────────────────────────────────────────────
+  NotificationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/outageshield-notification-${Environment}
+      RetentionInDays: !Ref RetentionDays
+
+  TicketIntegratorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/outageshield-ticket-integrator-${Environment}
+      RetentionInDays: !Ref RetentionDays
+
+Outputs:
+  IncidentAlertTopicArn:
+    Value: !Ref IncidentAlertTopic
+    Export:
+      Name: !Sub outageshield-notifications-${Environment}-TopicArn
+
+  EscalationTopicArn:
+    Value: !Ref EscalationTopic
+    Export:
+      Name: !Sub outageshield-notifications-${Environment}-EscalationTopicArn
+
+  NotificationLambdaArn:
+    Value: !GetAtt NotificationLambda.Arn
+    Export:
+      Name: !Sub outageshield-notifications-${Environment}-LambdaArn
+
+  TicketIntegratorLambdaArn:
+    Value: !GetAtt TicketIntegratorLambda.Arn
+    Export:
+      Name: !Sub outageshield-notifications-${Environment}-TicketLambdaArn

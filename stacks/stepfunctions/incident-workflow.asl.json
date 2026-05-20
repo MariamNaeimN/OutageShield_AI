@@ -1,0 +1,346 @@
+{
+  "Comment": "OutageShield AI — Incident Investigation Workflow. Each incident runs as its own execution (parallel at execution level). Within each execution, the flow is sequential: everything stops at human approval until approved. Ticket and notify only happen AFTER approval.",
+  "StartAt": "InitializeIncident",
+  "States": {
+
+    "InitializeIncident": {
+      "Type": "Task",
+      "Comment": "Create incident record in DynamoDB, set status to investigating",
+      "Resource": "arn:aws:states:::dynamodb:putItem",
+      "Parameters": {
+        "TableName": "${IncidentsTable}",
+        "Item": {
+          "incident_id": {"S.$": "$.signal.signal_id"},
+          "service": {"S.$": "$.signal.service"},
+          "severity_score": {"N.$": "States.Format('{}', $.signal.severity_score)"},
+          "status": {"S": "investigating"},
+          "created_at": {"S.$": "$$.State.EnteredTime"},
+          "workflow_id": {"S.$": "$$.Execution.Id"}
+        }
+      },
+      "ResultPath": "$.init_result",
+      "Next": "CorrelateContext"
+    },
+
+    "CorrelateContext": {
+      "Type": "Task",
+      "Comment": "Build Incident Context from deployments, config changes, past incidents, logs, traces",
+      "Resource": "${CorrelationLambdaArn}",
+      "TimeoutSeconds": 120,
+      "Retry": [{"ErrorEquals": ["States.TaskFailed", "States.Timeout"], "IntervalSeconds": 5, "MaxAttempts": 2}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "HandleCorrelationFailure", "ResultPath": "$.error"}],
+      "ResultPath": "$.correlation_result",
+      "Next": "UpdateDashboard_Correlation"
+    },
+
+    "HandleCorrelationFailure": {
+      "Type": "Pass",
+      "Result": {"step": "correlation", "status": "failed", "incident_context": {"unavailable_sources": ["all"]}},
+      "ResultPath": "$.correlation_result",
+      "Next": "UpdateDashboard_Correlation"
+    },
+
+    "UpdateDashboard_Correlation": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${WorkflowStateTable}",
+        "Key": {"workflow_id": {"S.$": "$$.Execution.Id"}},
+        "UpdateExpression": "SET current_step = :step, correlation_completed_at = :ts",
+        "ExpressionAttributeValues": {":step": {"S": "scoring"}, ":ts": {"S.$": "$$.State.EnteredTime"}}
+      },
+      "ResultPath": "$.dashboard_update",
+      "Next": "ScoreIncident"
+    },
+
+    "ScoreIncident": {
+      "Type": "Task",
+      "Comment": "Calculate Severity (1-5) and Business Impact (1-10)",
+      "Resource": "${ScoringLambdaArn}",
+      "TimeoutSeconds": 30,
+      "Retry": [{"ErrorEquals": ["States.TaskFailed", "States.Timeout"], "IntervalSeconds": 5, "MaxAttempts": 2}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "HandleScoringFailure", "ResultPath": "$.error"}],
+      "ResultPath": "$.scoring_result",
+      "Next": "CheckEscalation"
+    },
+
+    "HandleScoringFailure": {
+      "Type": "Pass",
+      "Result": {"step": "scoring", "status": "failed", "severity_score": 3, "business_impact_score": 5, "flag": "timeout-default"},
+      "ResultPath": "$.scoring_result",
+      "Next": "CheckEscalation"
+    },
+
+    "CheckEscalation": {
+      "Type": "Choice",
+      "Comment": "If severity >= 4, send escalation alert before continuing",
+      "Choices": [{"Variable": "$.scoring_result.severity_score", "NumericGreaterThanEquals": 4, "Next": "SendEscalationAlert"}],
+      "Default": "AnalyzeRootCause"
+    },
+
+    "SendEscalationAlert": {
+      "Type": "Task",
+      "Resource": "${NotificationLambdaArn}",
+      "Parameters": {
+        "type": "escalation",
+        "severity_score.$": "$.scoring_result.severity_score",
+        "business_impact_score.$": "$.scoring_result.business_impact_score",
+        "service.$": "$.signal.service",
+        "incident_id.$": "$.signal.signal_id"
+      },
+      "TimeoutSeconds": 30,
+      "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 2}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "AnalyzeRootCause", "ResultPath": "$.escalation_error"}],
+      "ResultPath": "$.escalation_result",
+      "Next": "AnalyzeRootCause"
+    },
+
+    "AnalyzeRootCause": {
+      "Type": "Task",
+      "Comment": "Bedrock root-cause analysis — ranked causes with confidence scores",
+      "Resource": "${RootCauseLambdaArn}",
+      "TimeoutSeconds": 90,
+      "Retry": [{"ErrorEquals": ["States.TaskFailed", "States.Timeout"], "IntervalSeconds": 5, "MaxAttempts": 2}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "HandleRCAFailure", "ResultPath": "$.error"}],
+      "ResultPath": "$.rca_result",
+      "Next": "UpdateDashboard_RCA"
+    },
+
+    "HandleRCAFailure": {
+      "Type": "Pass",
+      "Result": {"step": "root_cause_analysis", "status": "failed", "root_causes": [], "message": "Insufficient data"},
+      "ResultPath": "$.rca_result",
+      "Next": "UpdateDashboard_RCA"
+    },
+
+    "UpdateDashboard_RCA": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${WorkflowStateTable}",
+        "Key": {"workflow_id": {"S.$": "$$.Execution.Id"}},
+        "UpdateExpression": "SET current_step = :step, rca_completed_at = :ts",
+        "ExpressionAttributeValues": {":step": {"S": "remediation"}, ":ts": {"S.$": "$$.State.EnteredTime"}}
+      },
+      "ResultPath": "$.dashboard_update",
+      "Next": "RecommendRemediation"
+    },
+
+    "RecommendRemediation": {
+      "Type": "Task",
+      "Comment": "Generate 1-5 ranked remediation recommendations",
+      "Resource": "${RemediationLambdaArn}",
+      "TimeoutSeconds": 60,
+      "Retry": [{"ErrorEquals": ["States.TaskFailed", "States.Timeout"], "IntervalSeconds": 5, "MaxAttempts": 2}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "HandleRemediationFailure", "ResultPath": "$.error"}],
+      "ResultPath": "$.remediation_result",
+      "Next": "CheckAutoRemediation"
+    },
+
+    "HandleRemediationFailure": {
+      "Type": "Pass",
+      "Result": {"step": "remediation_recommendation", "status": "failed", "recommendations": []},
+      "ResultPath": "$.remediation_result",
+      "Next": "CheckAutoRemediation"
+    },
+
+    "CheckAutoRemediation": {
+      "Type": "Choice",
+      "Comment": "If auto-remediation enabled, go to human approval gate. Otherwise skip straight to ticket+notify.",
+      "Choices": [{"Variable": "$.signal.auto_remediation_enabled", "BooleanEquals": true, "Next": "WaitForHumanApproval"}],
+      "Default": "CreateTicket"
+    },
+
+    "WaitForHumanApproval": {
+      "Type": "Task",
+      "Comment": "HUMAN GATE: Pauses workflow INDEFINITELY until approver responds. Shows as 'Awaiting Approval' in dashboard UI. No ticket, no notify until approved. Each incident is its own execution so other incidents are not blocked.",
+      "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+      "Parameters": {
+        "FunctionName": "${ApprovalLambdaArn}",
+        "Payload": {
+          "task_token.$": "$$.Task.Token",
+          "incident_id.$": "$.signal.signal_id",
+          "service.$": "$.signal.service",
+          "severity_score.$": "$.scoring_result.severity_score",
+          "proposed_action.$": "$.remediation_result.recommendations[0]",
+          "risk_level.$": "$.remediation_result.recommendations[0].risk",
+          "workflow_id.$": "$$.Execution.Id"
+        }
+      },
+      "ResultPath": "$.approval_response",
+      "Catch": [
+        {
+          "ErrorEquals": ["ApprovalRejected"],
+          "Next": "ApprovalRejected",
+          "ResultPath": "$.approval_error"
+        },
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "ApprovalRejected",
+          "ResultPath": "$.approval_error"
+        }
+      ],
+      "Next": "UpdateDashboard_Approved"
+    },
+
+    "UpdateDashboard_Approved": {
+      "Type": "Task",
+      "Comment": "Update dashboard: approval received, proceeding to execute",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${WorkflowStateTable}",
+        "Key": {"workflow_id": {"S.$": "$$.Execution.Id"}},
+        "UpdateExpression": "SET current_step = :step, approved_at = :ts, approved_by = :by",
+        "ExpressionAttributeValues": {
+          ":step": {"S": "executing_remediation"},
+          ":ts": {"S.$": "$$.State.EnteredTime"},
+          ":by": {"S.$": "$.approval_response.responder"}
+        }
+      },
+      "ResultPath": "$.dashboard_update",
+      "Next": "ExecuteRemediation"
+    },
+
+    "ExecuteRemediation": {
+      "Type": "Task",
+      "Comment": "Execute the approved remediation action via Systems Manager",
+      "Resource": "${RemediationExecutorLambdaArn}",
+      "Parameters": {
+        "incident_id.$": "$.signal.signal_id",
+        "action.$": "$.remediation_result.recommendations[0]",
+        "service.$": "$.signal.service"
+      },
+      "TimeoutSeconds": 300,
+      "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 1}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "HandleExecutionFailure", "ResultPath": "$.execution_error"}],
+      "ResultPath": "$.execution_result",
+      "Next": "CreateTicket"
+    },
+
+    "HandleExecutionFailure": {
+      "Type": "Pass",
+      "Comment": "Remediation execution failed — continue to ticket/notify with failure info",
+      "Result": {"execution_status": "failed"},
+      "ResultPath": "$.execution_result",
+      "Next": "CreateTicket"
+    },
+
+    "ApprovalRejected": {
+      "Type": "Pass",
+      "Comment": "Approver rejected — skip execution, proceed to ticket/notify",
+      "Result": {"execution_status": "rejected_by_approver"},
+      "ResultPath": "$.execution_result",
+      "Next": "CreateTicket"
+    },
+
+    "CreateTicket": {
+      "Type": "Choice",
+      "Comment": "Create ticket if severity >= 3. This only runs AFTER approval (or if no approval needed).",
+      "Choices": [{"Variable": "$.scoring_result.severity_score", "NumericGreaterThanEquals": 3, "Next": "InvokeTicketCreation"}],
+      "Default": "NotifyTeam"
+    },
+
+    "InvokeTicketCreation": {
+      "Type": "Task",
+      "Comment": "Create ticket in ServiceNow/Jira — only after approval gate passed",
+      "Resource": "${TicketIntegratorLambdaArn}",
+      "Parameters": {
+        "action": "create",
+        "incident_id.$": "$.signal.signal_id",
+        "service.$": "$.signal.service",
+        "severity_score.$": "$.scoring_result.severity_score",
+        "business_impact_score.$": "$.scoring_result.business_impact_score",
+        "summary.$": "States.Format('Incident on {} - Severity {}', $.signal.service, $.scoring_result.severity_score)",
+        "recommendations.$": "$.remediation_result.recommendations",
+        "execution_status.$": "$.execution_result"
+      },
+      "TimeoutSeconds": 60,
+      "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 10, "MaxAttempts": 3}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "NotifyTeam", "ResultPath": "$.ticket_error"}],
+      "ResultPath": "$.ticket_result",
+      "Next": "NotifyTeam"
+    },
+
+    "NotifyTeam": {
+      "Type": "Task",
+      "Comment": "Send incident alert — only after approval gate passed",
+      "Resource": "${NotificationLambdaArn}",
+      "Parameters": {
+        "type": "alert",
+        "service.$": "$.signal.service",
+        "incident_id.$": "$.signal.signal_id",
+        "severity_score.$": "$.scoring_result.severity_score",
+        "timestamp.$": "$.signal.timestamp",
+        "summary.$": "States.Format('Outage signal on {} — approval status: {}', $.signal.service, $.execution_result.execution_status)"
+      },
+      "TimeoutSeconds": 30,
+      "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 3, "BackoffRate": 2.0}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "HandleNotificationFailure", "ResultPath": "$.notify_error"}],
+      "ResultPath": "$.notification_result",
+      "Next": "UpdateDashboard_Final"
+    },
+
+    "HandleNotificationFailure": {
+      "Type": "Pass",
+      "Result": {"step": "notification", "status": "failed", "escalated": true},
+      "ResultPath": "$.notification_result",
+      "Next": "UpdateDashboard_Final"
+    },
+
+    "UpdateDashboard_Final": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${WorkflowStateTable}",
+        "Key": {"workflow_id": {"S.$": "$$.Execution.Id"}},
+        "UpdateExpression": "SET current_step = :step, completed_at = :ts",
+        "ExpressionAttributeValues": {":step": {"S": "complete"}, ":ts": {"S.$": "$$.State.EnteredTime"}}
+      },
+      "ResultPath": "$.dashboard_update",
+      "Next": "DetermineWorkflowStatus"
+    },
+
+    "DetermineWorkflowStatus": {
+      "Type": "Choice",
+      "Comment": "Final status: resolved if all OK, degraded if critical steps failed",
+      "Choices": [
+        {
+          "Or": [
+            {"Variable": "$.correlation_result.status", "StringEquals": "failed"},
+            {"Variable": "$.rca_result.status", "StringEquals": "failed"}
+          ],
+          "Next": "WorkflowDegraded"
+        }
+      ],
+      "Default": "WorkflowResolved"
+    },
+
+    "WorkflowResolved": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${IncidentsTable}",
+        "Key": {"incident_id": {"S.$": "$.signal.signal_id"}},
+        "UpdateExpression": "SET #s = :status, workflow_status = :ws, completed_at = :ts",
+        "ExpressionAttributeNames": {"#s": "status"},
+        "ExpressionAttributeValues": {":status": {"S": "mitigating"}, ":ws": {"S": "resolved"}, ":ts": {"S.$": "$$.State.EnteredTime"}}
+      },
+      "ResultPath": "$.final_update",
+      "End": true
+    },
+
+    "WorkflowDegraded": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "${IncidentsTable}",
+        "Key": {"incident_id": {"S.$": "$.signal.signal_id"}},
+        "UpdateExpression": "SET #s = :status, workflow_status = :ws, completed_at = :ts",
+        "ExpressionAttributeNames": {"#s": "status"},
+        "ExpressionAttributeValues": {":status": {"S": "investigating"}, ":ws": {"S": "degraded"}, ":ts": {"S.$": "$$.State.EnteredTime"}}
+      },
+      "ResultPath": "$.final_update",
+      "End": true
+    }
+  }
+}
