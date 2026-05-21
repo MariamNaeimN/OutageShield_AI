@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Bell, Ticket, RefreshCw, ChevronRight } from 'lucide-react'
+import { Bell, Ticket, RefreshCw, ChevronRight, ExternalLink } from 'lucide-react'
 import { getActiveIncidents } from '../services/api'
+
+const JIRA_BASE_URL = 'https://corpinfollc.atlassian.net'
 
 interface NotificationRecord {
   id: string
@@ -133,10 +135,12 @@ export default function Notifications() {
 
 function ExpandableTicket({ ticket }: { ticket: TicketRecord }) {
   const navigate = useNavigate()
+  const jiraUrl = `${JIRA_BASE_URL}/browse/${ticket.ticket_id}`
+
   return (
-    <div className="bg-[#161b22] border border-gray-800 rounded-xl overflow-hidden cursor-pointer hover:border-blue-800/50 transition-colors" onClick={() => navigate(`/tickets/${ticket.incident_id}`)}>
+    <div className="bg-[#161b22] border border-gray-800 rounded-xl overflow-hidden hover:border-blue-800/50 transition-colors">
       <div className="flex items-center justify-between px-4 py-3">
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-4 min-w-0 flex-1 cursor-pointer" onClick={() => navigate(`/tickets/${ticket.incident_id}`)}>
           <div className="w-8 h-8 bg-blue-900/30 rounded-lg flex items-center justify-center flex-shrink-0">
             <Ticket className="w-4 h-4 text-blue-400" />
           </div>
@@ -154,7 +158,17 @@ function ExpandableTicket({ ticket }: { ticket: TicketRecord }) {
         </div>
         <div className="flex items-center gap-3 flex-shrink-0">
           <span className="text-xs text-gray-500">{ticket.service}</span>
-          <ChevronRight className="w-4 h-4 text-gray-600" />
+          <a
+            href={jiraUrl}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="p-1.5 rounded-md hover:bg-blue-900/30 text-gray-500 hover:text-blue-400 transition-colors"
+            title="Open in Jira"
+          >
+            <ExternalLink className="w-4 h-4" />
+          </a>
+          <ChevronRight className="w-4 h-4 text-gray-600 cursor-pointer" onClick={() => navigate(`/tickets/${ticket.incident_id}`)} />
         </div>
       </div>
     </div>

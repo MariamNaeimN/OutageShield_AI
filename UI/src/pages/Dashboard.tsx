@@ -15,35 +15,32 @@ export default function Dashboard() {
 
   const fetchData = async () => {
     try {
-      const [incidentData, riskData] = await Promise.all([
-        getActiveIncidents(),
-        getServiceRisks()
-      ])
+      const incidentData = await getActiveIncidents()
       setIncidents(incidentData)
-      setServiceRisks(riskData)
-      // Fetch events count and data for risk overview
-      try {
-        const eventsResp = await fetch((import.meta.env.VITE_API_URL || '/api') + '/events')
-        if (eventsResp.ok) {
-          const eventsData = await eventsResp.json()
-          setEventsCount(eventsData.count || 0)
-          // Show only non-alarm events (config changes, cloudtrail) — the correlation context
-          const allEvents = eventsData.events || []
-          const correlationOnly = allEvents.filter((e: Record<string, unknown>) => 
-            String(e.source || '').includes('config') || 
-            String(e.source || '').includes('cloudtrail') ||
-            e.severity === 'medium' || 
-            e.severity === 'informational'
-          )
-          setCorrelationEvents(correlationOnly)
-        }
-      } catch { /* events endpoint might not exist */ }
     } catch {
       setIncidents([])
-      setServiceRisks([])
-    } finally {
-      setLoading(false)
     }
+    try {
+      const riskData = await getServiceRisks()
+      setServiceRisks(riskData)
+    } catch { /* risk endpoint may fail */ }
+    // Fetch events count and data for risk overview
+    try {
+      const eventsResp = await fetch((import.meta.env.VITE_API_URL || '/dev') + '/events')
+      if (eventsResp.ok) {
+        const eventsData = await eventsResp.json()
+        setEventsCount(eventsData.count || 0)
+        const allEvents = eventsData.events || []
+        const correlationOnly = allEvents.filter((e: Record<string, unknown>) => 
+          String(e.source || '').includes('config') || 
+          String(e.source || '').includes('cloudtrail') ||
+          e.severity === 'medium' || 
+          e.severity === 'informational'
+        )
+        setCorrelationEvents(correlationOnly)
+      }
+    } catch { /* events endpoint might not exist */ }
+    setLoading(false)
   }
 
   useEffect(() => {
@@ -93,6 +90,25 @@ export default function Dashboard() {
         <StatCard label="High Risk Services" value={highRiskServices} color="orange" />
         <StatCard label="Total Incidents (24h)" value={incidents.length} color="blue" />
         <StatCard label="Raw Events" value={eventsCount} color="green" />
+      </div>
+
+      {/* Raw Events vs Incidents Records */}
+      <div className="grid grid-cols-3 gap-4">
+        <div className="bg-[#161b22] border border-blue-900/60 rounded-xl p-4">
+          <p className="text-xs font-medium text-blue-400 mb-1">Raw Events (DynamoDB)</p>
+          <p className="text-3xl font-bold text-white">{eventsCount}</p>
+          <p className="text-[10px] text-gray-500 mt-1">outageshield-events-dev</p>
+        </div>
+        <div className="bg-[#161b22] border border-purple-900/60 rounded-xl p-4">
+          <p className="text-xs font-medium text-purple-400 mb-1">Incidents (DynamoDB)</p>
+          <p className="text-3xl font-bold text-white">{incidents.length}</p>
+          <p className="text-[10px] text-gray-500 mt-1">outageshield-incidents-dev</p>
+        </div>
+        <div className="bg-[#161b22] border border-yellow-900/60 rounded-xl p-4">
+          <p className="text-xs font-medium text-yellow-400 mb-1">Difference</p>
+          <p className="text-3xl font-bold text-white">{eventsCount - incidents.length}</p>
+          <p className="text-[10px] text-gray-500 mt-1">{eventsCount > 0 ? `${Math.round(((eventsCount - incidents.length) / eventsCount) * 100)}% noise filtered` : 'No data'}</p>
+        </div>
       </div>
 
       {/* Active Incidents Table */}
@@ -168,9 +184,9 @@ export default function Dashboard() {
         )}
       </div>
 
-      {/* Service Risk Overview */}
+      {/* Business Impact Overview */}
       <div>
-        <h3 className="text-lg font-semibold text-white mb-4">Service Risk Overview</h3>
+        <h3 className="text-lg font-semibold text-white mb-4">Business Impact Overview</h3>
         <div className="bg-[#161b22] border border-gray-800 rounded-xl p-5">
           {incidents.length === 0 ? (
             <p className="text-sm text-gray-500 text-center py-4">No data</p>
@@ -178,51 +194,26 @@ export default function Dashboard() {
             <div className="flex gap-8">
               <div className="flex-1 space-y-3">
                 {(() => {
-                  // Use real API risk scores if available, otherwise derive from incidents
-                  if (serviceRisks.length > 0 && (serviceRisks[0] as any).revenue_at_risk !== undefined) {
-                    // Real Bedrock-generated risk scores + revenue from API
-                    const sorted = [...serviceRisks]
-                      .sort((a, b) => ((b as any).revenue_at_risk || 0) - ((a as any).revenue_at_risk || 0))
-                      .slice(0, 8)
-                    const maxRevenue = (sorted[0] as any)?.revenue_at_risk || 1
-                    return sorted.map(svc => (
-                      <div key={svc.service} className="flex items-center gap-3">
-                        <span className="text-sm text-gray-300 w-36 truncate">{svc.service}</span>
-                        <div className="flex-1 h-5 bg-gray-800 rounded-full overflow-hidden">
-                          <div className={`h-full rounded-full ${
-                            svc.risk === 'Critical' ? 'bg-red-500' :
-                            svc.risk === 'High' ? 'bg-orange-500' :
-                            svc.risk === 'Medium' ? 'bg-yellow-500' : 'bg-green-500'
-                          }`} style={{ width: `${Math.max(15, ((svc as any).revenue_at_risk / maxRevenue) * 100)}%` }} />
-                        </div>
-                        <span className="text-sm text-gray-400 w-20 text-right">${((svc as any).revenue_at_risk || 0).toLocaleString()}/h</span>
-                      </div>
-                    ))
-                  }
-                  // Fallback: derive from incidents
-                  const svcMap = new Map<string, { count: number; maxSev: number; totalSev: number }>()
-                  incidents.forEach(inc => {
-                    const existing = svcMap.get(inc.service) || { count: 0, maxSev: 0, totalSev: 0 }
-                    existing.count++
-                    existing.totalSev += inc.severity
-                    if (inc.severity > existing.maxSev) existing.maxSev = inc.severity
-                    svcMap.set(inc.service, existing)
-                  })
-                  const scored = Array.from(svcMap.entries()).map(([name, data]) => ({
-                    name,
-                    score: data.totalSev * data.count,
-                    maxSev: data.maxSev,
-                    count: data.count
-                  }))
-                  const sorted = scored.sort((a, b) => b.score - a.score).slice(0, 8)
-                  const maxScore = sorted[0]?.score || 1
-                  return sorted.map(svc => (
-                    <div key={svc.name} className="flex items-center gap-3">
-                      <span className="text-sm text-gray-300 w-36 truncate">{svc.name}</span>
+                  const critical = incidents.filter(i => i.businessImpact >= 8).length
+                  const high = incidents.filter(i => i.businessImpact >= 6 && i.businessImpact < 8).length
+                  const medium = incidents.filter(i => i.businessImpact >= 4 && i.businessImpact < 6).length
+                  const low = incidents.filter(i => i.businessImpact < 4).length
+                  const max = Math.max(critical, high, medium, low, 1)
+
+                  const categories = [
+                    { label: 'Critical', count: critical, barClass: 'bg-red-500', textClass: 'text-red-400' },
+                    { label: 'High', count: high, barClass: 'bg-orange-500', textClass: 'text-orange-400' },
+                    { label: 'Medium', count: medium, barClass: 'bg-yellow-500', textClass: 'text-yellow-400' },
+                    { label: 'Low', count: low, barClass: 'bg-green-500', textClass: 'text-green-400' }
+                  ]
+
+                  return categories.map(cat => (
+                    <div key={cat.label} className="flex items-center gap-3">
+                      <span className={`text-sm font-medium w-20 ${cat.textClass}`}>{cat.label}</span>
                       <div className="flex-1 h-5 bg-gray-800 rounded-full overflow-hidden">
-                        <div className={`h-full rounded-full ${svc.maxSev >= 4 ? 'bg-red-500' : svc.maxSev >= 3 ? 'bg-orange-500' : 'bg-yellow-500'}`} style={{ width: `${Math.max(15, (svc.score / maxScore) * 100)}%` }} />
+                        <div className={`h-full rounded-full ${cat.barClass}`} style={{ width: `${cat.count > 0 ? Math.max(5, (cat.count / max) * 100) : 0}%` }} />
                       </div>
-                      <span className="text-sm text-gray-400 w-8 text-right">{svc.score}</span>
+                      <span className="text-sm font-bold text-white w-8 text-right">{cat.count}</span>
                     </div>
                   ))
                 })()}
@@ -236,7 +227,7 @@ export default function Dashboard() {
                   </PieChart>
                 </ResponsiveContainer>
                 <div className="absolute inset-0 flex flex-col items-center justify-center">
-                  <span className="text-2xl font-bold text-white">{serviceRisks.length > 0 ? serviceRisks.length : incidents.length}</span>
+                  <span className="text-2xl font-bold text-white">{incidents.length}</span>
                   <span className="text-xs text-gray-400">Total</span>
                 </div>
               </div>

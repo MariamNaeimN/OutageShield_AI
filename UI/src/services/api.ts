@@ -4,7 +4,7 @@
  * All data comes from the real pipeline (DynamoDB, OpenSearch, Step Functions).
  */
 
-const API_BASE = import.meta.env.VITE_API_URL || 'https://your-api-id.execute-api.us-east-1.amazonaws.com/dev'
+const API_BASE = import.meta.env.VITE_API_URL || '/dev'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -64,6 +64,7 @@ export interface Postmortem {
   prevention: string[]
   impactSummary: string
   evidence: string[]
+  scoringReasoning?: string
 }
 
 export interface ApprovalResponse {
@@ -76,17 +77,24 @@ export interface ApprovalResponse {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function fetchJson<T>(path: string): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const url = `${API_BASE}${path}`
+  console.log(`[API] Fetching: ${url}`)
+  const response = await fetch(url, {
+    method: 'GET',
+    mode: 'cors',
     headers: {
-      'Content-Type': 'application/json'
+      'Accept': 'application/json'
     }
   })
 
   if (!response.ok) {
+    console.error(`[API] Error: ${response.status} ${response.statusText}`)
     throw new Error(`API error: ${response.status} ${response.statusText}`)
   }
 
-  return response.json()
+  const data = await response.json()
+  console.log(`[API] Success: ${path}`, data?.count || data?.length || 'ok')
+  return data
 }
 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
@@ -189,7 +197,8 @@ export async function getPostmortems(): Promise<Postmortem[]> {
       rootCause: (nested.root_cause || raw.root_cause || '') as string,
       prevention: parsePrevention(nested.prevention || raw.prevention),
       impactSummary: (nested.impact || raw.impact_summary || '') as string,
-      evidence: []
+      evidence: [],
+      scoringReasoning: (raw.scoring_reasoning || nested.scoring_reasoning || '') as string
     }
   })
 }

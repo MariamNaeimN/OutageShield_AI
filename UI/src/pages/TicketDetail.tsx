@@ -1,7 +1,10 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
-import { ArrowLeft, RefreshCw, Ticket, ExternalLink } from 'lucide-react'
+import { ArrowLeft, RefreshCw, Ticket, ExternalLink, LayoutDashboard } from 'lucide-react'
 import { getActiveIncidents, type Incident } from '../services/api'
+
+const JIRA_BASE_URL = 'https://corpinfollc.atlassian.net'
+const DASHBOARD_URL = import.meta.env.VITE_DASHBOARD_URL || 'https://d2k1km1tzlio49.cloudfront.net'
 
 export default function TicketDetail() {
   const { id } = useParams()
@@ -152,21 +155,47 @@ export default function TicketDetail() {
           )}
         </div>
 
+        {/* Jira Board Link */}
+        <div>
+          <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Open in Jira</p>
+          <a
+            href={`${JIRA_BASE_URL}/browse/${incident.ticket?.id || ''}`}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-2 text-sm text-blue-400 hover:text-blue-300 bg-blue-900/20 border border-blue-800/40 rounded-lg px-3 py-2"
+          >
+            <ExternalLink className="w-3.5 h-3.5" />
+            {incident.ticket?.id || 'View Ticket'} on Jira
+          </a>
+        </div>
+
+        {/* Dashboard Link */}
+        <div>
+          <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">OutageShield Dashboard</p>
+          <a
+            href={ticketContent.dashboard_url || `${DASHBOARD_URL}/incidents/${incident.id}`}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-2 text-sm text-brand-400 hover:text-brand-300 bg-brand-900/20 border border-brand-800/40 rounded-lg px-3 py-2"
+          >
+            <LayoutDashboard className="w-3.5 h-3.5" />
+            View in Dashboard
+          </a>
+        </div>
+
         {/* Ticket URL */}
-        {Boolean(ticketContent.url || raw.ticket_url) && (
-          <div>
-            <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Ticket URL</p>
-            <a
-              href={String(ticketContent.url || raw.ticket_url)}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-2 text-sm text-blue-400 hover:text-blue-300"
-            >
-              <ExternalLink className="w-3.5 h-3.5" />
-              {String(ticketContent.url || raw.ticket_url)}
-            </a>
-          </div>
-        )}
+        <div>
+          <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Ticket URL</p>
+          <a
+            href={`${JIRA_BASE_URL}/browse/${incident.ticket?.id || ''}`}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-2 text-sm text-blue-400 hover:text-blue-300"
+          >
+            <ExternalLink className="w-3.5 h-3.5" />
+            {`${JIRA_BASE_URL}/browse/${incident.ticket?.id || ''}`}
+          </a>
+        </div>
 
         {/* Created */}
         {ticketContent.created_at && (

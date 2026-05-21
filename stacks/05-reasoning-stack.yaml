@@ -345,17 +345,7 @@ Resources:
               incident_id = incident_context.get('signal_id', incident_context.get('signal', {}).get('signal_id', ''))
               service = incident_context.get('service', 'unknown')
 
-              prompt = f"""You are an SRE AI agent evaluating an incident for service "{service}".
-              Evaluate this incident and return ONLY a JSON object with these fields:
-              - severity_score: integer 1-5 (1=low, 5=critical)
-              - business_impact_score: integer 1-10 (10=catastrophic)
-              - affected_users: integer estimate of affected users
-              - revenue_at_risk: string like "$X,XXX/hour"
-              - sla_status: one of "OK", "Warning", "At Risk", "Breached"
-              - service_risk_score: integer 0-100 representing overall risk level for this service (consider: blast radius, dependencies, data sensitivity, customer-facing nature, recovery complexity)
-
-              Context: {json.dumps(incident_context, default=str)[:1500]}
-              Return JSON only, no other text."""
+              prompt = f"""You are a senior SRE consultant with 15+ years of experience in cloud operations, incident management, and business continuity. You are evaluating an incident on service "{service}". Based ONLY on the factual evidence provided below, assess the business impact. RULES: Base estimates on alarm type, service role, and blast radius. Customer-facing services (payments, auth, gateway, API) = higher impact. Internal/backend (logger, scheduler, config) = lower impact. For revenue, reason about service category. For affected users, reason about critical path. Provide a reasoning field explaining your logic. Do NOT invent numbers without justification. Return ONLY a JSON object with: severity_score (1-5), business_impact_score (1-10), affected_users (integer, 0 if internal), revenue_at_risk (string with basis), sla_status (OK/Warning/At Risk/Breached), service_risk_score (0-100), reasoning (1-2 sentences explaining your assessment). Context: {json.dumps(incident_context, default=str)[:1500]}. Return JSON only."""
 
               try:
                   response = bedrock.invoke_model(
@@ -377,11 +367,12 @@ Resources:
                       'affected_users': int(result.get('affected_users', 0)),
                       'revenue_at_risk': result.get('revenue_at_risk', 'Unknown'),
                       'sla_status': result.get('sla_status', 'Unknown'),
-                      'service_risk_score': int(result.get('service_risk_score', 50))
+                      'service_risk_score': int(result.get('service_risk_score', 50)),
+                      'scoring_reasoning': result.get('reasoning', '')
                   }
               except Exception as e:
                   print(f"Scoring error: {e}")
-                  scores = {'severity_score': 3, 'business_impact_score': 5, 'affected_users': 0, 'revenue_at_risk': 'Unknown', 'sla_status': 'Unknown', 'service_risk_score': 50}
+                  scores = {'severity_score': 3, 'business_impact_score': 5, 'affected_users': 0, 'revenue_at_risk': 'Unknown', 'sla_status': 'Unknown', 'service_risk_score': 50, 'scoring_reasoning': ''}
 
               # Store scores in incidents table
               if incident_id:
@@ -394,7 +385,7 @@ Resources:
               try:
                   table.update_item(
                       Key={'incident_id': incident_id},
-                      UpdateExpression='SET severity_score = :s, business_impact_score = :b, affected_users = :au, revenue_at_risk = :r, sla_status = :sla, service_risk_score = :srs, workflow_step = :ws',
+                      UpdateExpression='SET severity_score = :s, business_impact_score = :b, affected_users = :au, revenue_at_risk = :r, sla_status = :sla, service_risk_score = :srs, scoring_reasoning = :sr, workflow_step = :ws',
                       ExpressionAttributeValues={
                           ':s': scores['severity_score'],
                           ':b': scores['business_impact_score'],
@@ -402,6 +393,7 @@ Resources:
                           ':r': scores['revenue_at_risk'],
                           ':sla': scores['sla_status'],
                           ':srs': scores['service_risk_score'],
+                          ':sr': scores.get('scoring_reasoning', ''),
                           ':ws': 'scoring'
                       }
                   )

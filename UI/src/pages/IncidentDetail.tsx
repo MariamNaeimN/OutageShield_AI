@@ -1,7 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link, useLocation } from 'react-router-dom'
-import { ArrowLeft, RefreshCw } from 'lucide-react'
+import { ArrowLeft, RefreshCw, ExternalLink, FileText } from 'lucide-react'
 import { getActiveIncidents, type Incident } from '../services/api'
+
+const JIRA_BASE_URL = 'https://corpinfollc.atlassian.net'
 
 export default function IncidentDetail() {
   const { id } = useParams()
@@ -117,13 +119,53 @@ export default function IncidentDetail() {
             </div>
           )}
 
+          {/* Postmortem Reference */}
+          <div className="bg-[#161b22] border border-gray-800 rounded-xl p-5">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 bg-purple-900/25 rounded-lg flex items-center justify-center">
+                  <FileText className="w-4 h-4 text-purple-400" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-white">Postmortem Report</h3>
+                  <p className="text-xs text-gray-500 mt-0.5">AI-generated analysis & prevention steps</p>
+                </div>
+              </div>
+              <Link
+                to={`/postmortems`}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-purple-900/20 border border-purple-800/40 rounded-lg text-xs text-purple-400 hover:bg-purple-900/30 transition-colors"
+              >
+                <FileText className="w-3 h-3" />
+                View Postmortem
+              </Link>
+            </div>
+          </div>
+
           {/* Ticket */}
           {incident.ticket && (
             <div id="ticket" className="bg-[#161b22] border border-gray-800 rounded-xl p-5 scroll-mt-6">
-              <h3 className="text-sm font-semibold text-white mb-3">Linked Ticket</h3>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-white">Linked Ticket</h3>
+                <a
+                  href={`${JIRA_BASE_URL}/browse/${incident.ticket.id}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1.5 text-xs text-blue-400 hover:text-blue-300"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  Open in Jira
+                </a>
+              </div>
               <div className="space-y-2">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium text-blue-400">{incident.ticket.id}</span>
+                  <a
+                    href={`${JIRA_BASE_URL}/browse/${incident.ticket.id}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-sm font-medium text-blue-400 hover:text-blue-300"
+                  >
+                    {incident.ticket.id}
+                  </a>
                   <span className="text-xs text-gray-500">•</span>
                   <span className="text-xs text-gray-400">{incident.ticket.system}</span>
                   <span className="text-xs text-gray-500">•</span>
@@ -157,7 +199,7 @@ export default function IncidentDetail() {
                         </div>
                         <div>
                           <p className="text-xs text-gray-500">Ticket URL</p>
-                          <a href={content.url} target="_blank" rel="noreferrer" className="text-blue-400 text-xs hover:text-blue-300">{content.url}</a>
+                          <a href={`${JIRA_BASE_URL}/browse/${incident.ticket?.id}`} target="_blank" rel="noreferrer" className="text-blue-400 text-xs hover:text-blue-300">{`${JIRA_BASE_URL}/browse/${incident.ticket?.id}`}</a>
                         </div>
                       </div>
                     )
@@ -270,7 +312,7 @@ export default function IncidentDetail() {
                     {raw.ticket_url && (
                       <div className="flex justify-between">
                         <span className="text-gray-400">Ticket URL</span>
-                        <a href={raw.ticket_url as string} target="_blank" rel="noreferrer" className="text-blue-400 text-xs hover:text-blue-300 truncate max-w-[150px]">{raw.ticket_url as string}</a>
+                        <a href={`${JIRA_BASE_URL}/browse/${incident.ticket?.id || ''}`} target="_blank" rel="noreferrer" className="text-blue-400 text-xs hover:text-blue-300 truncate max-w-[150px]">{incident.ticket?.id || raw.ticket_url as string}</a>
                       </div>
                     )}
                   </>

@@ -70,7 +70,7 @@ ALARM_SCENARIOS = [
 # Step 1: Clear all tables
 # ─────────────────────────────────────────────────────────────────────────────
 print("\n" + "=" * 70)
-print("  OutageShield AI — FULL DEMO (60 Incidents)")
+print("  OutageShield AI — FULL DEMO (100 Incidents)")
 print("  No cheating. All data produced by the AI agent pipeline.")
 print("=" * 70)
 
@@ -94,7 +94,7 @@ for table_name in ['outageshield-incidents-dev', 'outageshield-events-dev',
 # ─────────────────────────────────────────────────────────────────────────────
 # Step 2: Trigger 60 incidents
 # ─────────────────────────────────────────────────────────────────────────────
-print(f"\n[2/2] Triggering 60 incidents through the full agent pipeline...")
+print(f"\n[2/2] Triggering 100 incidents through the full agent pipeline...")
 print("  Each incident runs: Detection → Events → Step Functions → Bedrock AI")
 print("  → Correlation → Scoring → RCA → Remediation → Ticket → Notify → Postmortem")
 print("")
@@ -102,7 +102,7 @@ print("")
 triggered = 0
 failed = 0
 
-for i in range(60):
+for i in range(100):
     service = SERVICES[i % len(SERVICES)]
     alarm_type, reason_template = ALARM_SCENARIOS[i % len(ALARM_SCENARIOS)]
     val = random.randint(50, 999)
@@ -133,11 +133,11 @@ for i in range(60):
         failed += 1
         status = "✗"
 
-    print(f"  [{i+1:2d}/60] {status} {alarm_type}-{service}")
+    print(f"  [{i+1:3d}/100] {status} {alarm_type}-{service}")
 
     # Pause every 10 to avoid Step Functions throttling
     if (i + 1) % 10 == 0:
-        print(f"        ... pausing 15s (batch {(i+1)//10}/6 complete)")
+        print(f"        ... pausing 15s (batch {(i+1)//10}/10 complete)")
         time.sleep(15)
     else:
         time.sleep(1)
@@ -147,7 +147,7 @@ print("=" * 70)
 print(f"  ✅ {triggered} incidents triggered, {failed} failed")
 print("")
 print("  Workflows are running in parallel.")
-print("  Wait ~10-15 minutes for all Bedrock AI analysis to complete.")
+print("  Wait ~15-20 minutes for all Bedrock AI analysis to complete.")
 print("")
 print("  Then check ALL tables:")
 print(f"    • outageshield-events-dev       → {triggered} events")
@@ -155,7 +155,7 @@ print(f"    • outageshield-incidents-dev    → {triggered} incidents (with AI
 print(f"    • outageshield-workflow-state-dev → {triggered} workflow records")
 print(f"    • outageshield-postmortems-dev  → {triggered} AI postmortems")
 print("")
-print("  Dashboard: https://601lnlm7r5.execute-api.us-east-1.amazonaws.com/dev/incidents")
+print("  Dashboard: https://d2k1km1tzlio49.cloudfront.net")
 print("  UI: cd UI && npm run dev → http://localhost:3000")
 print("=" * 70)
 print("")

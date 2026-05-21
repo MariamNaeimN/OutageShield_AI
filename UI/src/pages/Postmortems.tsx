@@ -176,6 +176,19 @@ export default function Postmortems() {
                   <p className="text-sm text-gray-300 leading-relaxed pl-9">{selectedPm.impactSummary || 'Impact assessment pending'}</p>
                 </div>
 
+                {/* Scoring Reasoning */}
+                {selectedPm.scoringReasoning && (
+                  <div className="mb-5">
+                    <div className="flex items-center gap-2 mb-3">
+                      <div className="w-7 h-7 rounded-lg bg-purple-900/25 flex items-center justify-center">
+                        <Zap className="w-4 h-4 text-purple-400" />
+                      </div>
+                      <h4 className="text-sm font-semibold text-white">Scoring Reasoning</h4>
+                    </div>
+                    <p className="text-sm text-gray-300 leading-relaxed pl-9 whitespace-pre-wrap">{selectedPm.scoringReasoning}</p>
+                  </div>
+                )}
+
                 {/* Prevention */}
                 {selectedPm.prevention.length > 0 && (
                   <div className="mb-5">
