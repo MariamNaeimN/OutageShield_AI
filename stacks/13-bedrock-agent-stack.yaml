@@ -138,6 +138,7 @@ Resources:
             Fn::Sub: outageshield-storage-${Environment}-IncidentsTableName
           EVENTS_TABLE: !ImportValue
             Fn::Sub: outageshield-storage-${Environment}-EventsTableName
+          RUNBOOKS_TABLE: !Sub outageshield-runbooks-${Environment}
       Code:
         ZipFile: |
           import json
@@ -148,6 +149,7 @@ Resources:
           dynamodb = boto3.resource('dynamodb')
           INCIDENTS_TABLE = os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev')
           EVENTS_TABLE = os.environ.get('EVENTS_TABLE', 'outageshield-events-dev')
+          RUNBOOKS_TABLE = os.environ.get('RUNBOOKS_TABLE', 'outageshield-runbooks-dev')
 
           def lambda_handler(event, context):
               """
@@ -252,79 +254,49 @@ Resources:
               }
 
           def get_runbook(params):
-              """Look up remediation runbook for the service/alarm type."""
+              """Look up remediation runbook from DynamoDB."""
               service = params.get('service', '')
               alarm_type = params.get('alarm_type', '')
 
-              # Runbook recommendations based on alarm type
-              runbooks = {
-                  'HighLatency': {
-                      'title': 'High Latency Runbook',
-                      'steps': [
-                          'Check recent deployments for the service',
-                          'Review database connection pool utilization',
-                          'Check downstream dependency health',
-                          'Consider rollback if latency started after deployment',
-                          'Scale horizontally if load-related'
-                      ]
-                  },
-                  'High5xxRate': {
-                      'title': '5xx Error Rate Runbook',
-                      'steps': [
-                          'Check application logs for stack traces',
-                          'Verify database connectivity',
-                          'Check memory and CPU utilization',
-                          'Review recent config changes',
-                          'Rollback last deployment if errors started after deploy'
-                      ]
-                  },
-                  'HighCPU': {
-                      'title': 'High CPU Runbook',
-                      'steps': [
-                          'Identify hot threads or processes',
-                          'Check for infinite loops or memory leaks',
-                          'Scale up instance size or add replicas',
-                          'Review recent code changes',
-                          'Enable CPU profiling for root cause'
-                      ]
-                  },
-                  'MemoryPressure': {
-                      'title': 'Memory Pressure Runbook',
-                      'steps': [
-                          'Check for memory leaks in application',
-                          'Review heap dump if available',
-                          'Restart affected instances',
-                          'Scale up memory allocation',
-                          'Check for cache overflow'
-                      ]
-                  },
-                  'DBConnExhaustion': {
-                      'title': 'Database Connection Exhaustion Runbook',
-                      'steps': [
-                          'Check for connection leaks in application code',
-                          'Increase connection pool size',
-                          'Add connection timeout settings',
-                          'Check for long-running queries',
-                          'Consider read replicas for read-heavy workloads'
-                      ]
-                  }
-              }
+              # Look up runbook from DynamoDB
+              table = dynamodb.Table(RUNBOOKS_TABLE)
+              try:
+                  response = table.get_item(Key={'runbook_id': alarm_type})
+                  item = response.get('Item')
+                  if item:
+                      return {
+                          'service': service,
+                          'alarm_type': alarm_type,
+                          'runbook': {
+                              'title': item.get('title', ''),
+                              'description': item.get('description', ''),
+                              'steps': item.get('steps', []),
+                              'category': item.get('category', 'manual_intervention'),
+                              'estimated_ttr': item.get('estimated_ttr', 'Unknown'),
+                              'severity_threshold': int(item.get('severity_threshold', 3))
+                          }
+                      }
+              except Exception as e:
+                  print(f"Runbook lookup failed: {e}")
 
-              runbook = runbooks.get(alarm_type, {
-                  'title': f'General Runbook for {service}',
-                  'steps': [
-                      'Review CloudWatch metrics for anomalies',
-                      'Check recent deployments and config changes',
-                      'Review application logs for errors',
-                      'Check downstream dependencies',
-                      'Escalate to service owner if unresolved'
-                  ]
-              })
-
+              # Fallback if not found in DynamoDB
               return {
                   'service': service,
                   'alarm_type': alarm_type,
-                  'runbook': runbook
+                  'runbook': {
+                      'title': f'General Runbook for {service}',
+                      'description': 'Default runbook when no specific one is found',
+                      'steps': [
+                          'Review CloudWatch metrics for anomalies',
+                          'Check recent deployments and config changes',
+                          'Review application logs for errors',
+                          'Check downstream dependencies',
+                          'Escalate to service owner if unresolved'
+                      ],
+                      'category': 'manual_intervention',
+                      'estimated_ttr': 'Unknown',
+                      'severity_threshold': 3
+                  }
               }
 
           def check_deployments(params):
