@@ -21,7 +21,7 @@ Resources:
   BedrockAgentRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub outageshield-bedrock-agent-role-${Environment}
+      RoleName: !Sub outageshield-investigator-agent-role-${Environment}
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
@@ -78,6 +78,13 @@ Resources:
         - deployment_correlation: Whether a recent deployment is likely the cause
         - recommended_actions: What to do based on your investigation
       Description: !Sub OutageShield AI Incident Investigator Agent (${Environment})
+      ActionGroups:
+        - ActionGroupName: IncidentInvestigationTools
+          ActionGroupExecutor:
+            Lambda: !GetAtt AgentActionLambda.Arn
+          Description: Tools for searching incidents, logs, runbooks, and deployments
+          ApiSchema:
+            Payload: '{"openapi":"3.0.0","info":{"title":"OutageShield Investigation Tools","version":"1.0.0"},"paths":{"/search-incidents":{"get":{"operationId":"searchIncidentHistory","description":"Search past incidents for a service to find patterns and similar issues","parameters":[{"name":"service","in":"path","required":true,"schema":{"type":"string"},"description":"Service name to search incidents for"}],"responses":{"200":{"description":"List of past incidents"}}}},"/search-logs":{"get":{"operationId":"searchLogs","description":"Search OpenSearch logs for error patterns and anomalies related to the incident","parameters":[{"name":"service","in":"path","required":true,"schema":{"type":"string"},"description":"Service name to search logs for"},{"name":"time_range","in":"path","required":true,"schema":{"type":"string"},"description":"Time range to search such as 1h or 6h or 24h"}],"responses":{"200":{"description":"Log entries and patterns found"}}}},"/get-runbook":{"get":{"operationId":"getRunbook","description":"Look up the remediation runbook for a specific service and alarm type","parameters":[{"name":"service","in":"path","required":true,"schema":{"type":"string"},"description":"Service name"},{"name":"alarm_type","in":"path","required":true,"schema":{"type":"string"},"description":"Type of alarm such as HighLatency or High5xxRate or HighCPU"}],"responses":{"200":{"description":"Runbook with remediation steps"}}}},"/check-deployments":{"get":{"operationId":"checkDeployments","description":"Check recent deployments and configuration changes for a service that may have caused the incident","parameters":[{"name":"service","in":"path","required":true,"schema":{"type":"string"},"description":"Service name to check deployments for"}],"responses":{"200":{"description":"Recent deployments and config changes"}}}}}}'
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Agent Action Group Lambda — Tools the agent can use
@@ -358,129 +365,6 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: bedrock.amazonaws.com
       SourceArn: !GetAtt IncidentInvestigatorAgent.AgentArn
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Action Group — Investigation Tools
-  # ─────────────────────────────────────────────────────────────────────────────
-  InvestigationActionGroup:
-    Type: AWS::Bedrock::AgentActionGroup
-    Properties:
-      AgentId: !GetAtt IncidentInvestigatorAgent.AgentId
-      AgentVersion: DRAFT
-      ActionGroupName: IncidentInvestigationTools
-      ActionGroupExecutor:
-        Lambda: !GetAtt AgentActionLambda.Arn
-      ApiSchema:
-        Payload: |
-          {
-            "openapi": "3.0.0",
-            "info": {
-              "title": "OutageShield Incident Investigation Tools",
-              "version": "1.0.0",
-              "description": "Tools for autonomous incident investigation"
-            },
-            "paths": {
-              "/search-incidents": {
-                "get": {
-                  "operationId": "searchIncidentHistory",
-                  "summary": "Search past incidents for a service to find patterns and similar issues",
-                  "parameters": [
-                    {
-                      "name": "service",
-                      "in": "query",
-                      "required": true,
-                      "schema": {"type": "string"},
-                      "description": "Service name to search incidents for (e.g. payments-api, orders-service)"
-                    }
-                  ],
-                  "responses": {
-                    "200": {
-                      "description": "List of past incidents for the service",
-                      "content": {"application/json": {"schema": {"type": "object"}}}
-                    }
-                  }
-                }
-              },
-              "/search-logs": {
-                "get": {
-                  "operationId": "searchLogs",
-                  "summary": "Search OpenSearch logs for error patterns, stack traces, and anomalies related to the incident",
-                  "parameters": [
-                    {
-                      "name": "service",
-                      "in": "query",
-                      "required": true,
-                      "schema": {"type": "string"},
-                      "description": "Service name to search logs for"
-                    },
-                    {
-                      "name": "time_range",
-                      "in": "query",
-                      "required": false,
-                      "schema": {"type": "string", "default": "1h"},
-                      "description": "Time range to search (e.g. 1h, 6h, 24h)"
-                    }
-                  ],
-                  "responses": {
-                    "200": {
-                      "description": "Log entries and patterns found",
-                      "content": {"application/json": {"schema": {"type": "object"}}}
-                    }
-                  }
-                }
-              },
-              "/get-runbook": {
-                "get": {
-                  "operationId": "getRunbook",
-                  "summary": "Look up the remediation runbook for a specific service and alarm type",
-                  "parameters": [
-                    {
-                      "name": "service",
-                      "in": "query",
-                      "required": true,
-                      "schema": {"type": "string"},
-                      "description": "Service name"
-                    },
-                    {
-                      "name": "alarm_type",
-                      "in": "query",
-                      "required": true,
-                      "schema": {"type": "string"},
-                      "description": "Type of alarm (e.g. HighLatency, High5xxRate, HighCPU, MemoryPressure, DBConnExhaustion)"
-                    }
-                  ],
-                  "responses": {
-                    "200": {
-                      "description": "Runbook with remediation steps",
-                      "content": {"application/json": {"schema": {"type": "object"}}}
-                    }
-                  }
-                }
-              },
-              "/check-deployments": {
-                "get": {
-                  "operationId": "checkDeployments",
-                  "summary": "Check recent deployments and configuration changes for a service that may have caused the incident",
-                  "parameters": [
-                    {
-                      "name": "service",
-                      "in": "query",
-                      "required": true,
-                      "schema": {"type": "string"},
-                      "description": "Service name to check deployments for"
-                    }
-                  ],
-                  "responses": {
-                    "200": {
-                      "description": "Recent deployments and config changes",
-                      "content": {"application/json": {"schema": {"type": "object"}}}
-                    }
-                  }
-                }
-              }
-            }
-          }
-      Description: Tools for searching incidents, logs, runbooks, and deployments
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Log Group
