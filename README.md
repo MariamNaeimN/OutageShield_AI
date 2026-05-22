@@ -162,6 +162,139 @@ OutageShield AI/
 
 ---
 
+## Full Pipeline Flow
+
+```
+CloudWatch Alarm fires
+        │
+        ▼
+┌─────────────────────────┐
+│   Detection Lambda      │  Receives alarm event
+│   (03-detection-stack)  │  Writes to: outageshield-events-dev
+│                         │  Starts Step Functions workflow
+└───────────┬─────────────┘
+            │
+            ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                 STEP FUNCTIONS WORKFLOW                               │
+│                 (06-orchestration-stack)                              │
+│                                                                      │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │ Step 1: CORRELATE                                              │  │
+│  │ Lambda: outageshield-correlation-dev                           │  │
+│  │ Action: Gathers logs, metrics, traces, deployments, configs    │  │
+│  │ Writes: Creates incident record in outageshield-incidents-dev  │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                              │                                       │
+│                              ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │ Step 2: SCORE                                                  │  │
+│  │ Lambda: outageshield-scoring-dev + Amazon Bedrock              │  │
+│  │ Action: Evaluates severity, business impact, revenue at risk,  │  │
+│  │         affected users, SLA status, service risk score         │  │
+│  │ Writes: severity_score, business_impact_score, revenue_at_risk,│  │
+│  │         affected_users, sla_status, scoring_reasoning          │  │
+│  │         → outageshield-incidents-dev                           │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                              │                                       │
+│                              ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │ Step 3: ROOT CAUSE ANALYSIS                                    │  │
+│  │ Lambda: outageshield-root-cause-dev + Amazon Bedrock           │  │
+│  │ Action: Analyzes all context to identify probable root cause   │  │
+│  │ Writes: root_cause, confidence                                 │  │
+│  │         → outageshield-incidents-dev                           │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                              │                                       │
+│                              ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │ Step 4: REMEDIATION RECOMMENDATIONS                            │  │
+│  │ Lambda: outageshield-remediation-dev + Amazon Bedrock          │  │
+│  │ Action: Generates ranked fix options (rollback, scale, config) │  │
+│  │ Writes: recommendations_raw (JSON array with confidence,       │  │
+│  │         risk, estimated TTR)                                   │  │
+│  │         → outageshield-incidents-dev                           │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                              │                                       │
+│                              ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │ Step 5: APPROVAL GATE                                          │  │
+│  │ Action: Checks if auto-remediation is enabled                  │  │
+│  │         If yes → wait for human approval (waitForTaskToken)    │  │
+│  │         If no  → skip to ticket creation                       │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                              │                                       │
+│                              ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │ Step 6: EXECUTE REMEDIATION                                    │  │
+│  │ Action: Calls AWS Systems Manager to execute approved action   │  │
+│  │         (rollback deployment, scale service, update config)    │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                              │                                       │
+│                              ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │ Step 7: CREATE TICKET                                          │  │
+│  │ Lambda: outageshield-ticket-integrator-dev                     │  │
+│  │ Action: Creates Jira ticket via REST API v3 with full context  │  │
+│  │         Includes: incident details, root cause, dashboard link │  │
+│  │ Writes: ticket_id, ticket_system, ticket_status, ticket_url,   │  │
+│  │         ticket_content → outageshield-incidents-dev            │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                              │                                       │
+│                              ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │ Step 8: NOTIFY                                                 │  │
+│  │ Lambda: outageshield-notification-dev                          │  │
+│  │ Action: Sends SNS alert (email, Slack, PagerDuty)              │  │
+│  │         Includes ticket link + incident details                │  │
+│  │ Writes: notifications (JSON) → outageshield-incidents-dev      │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                              │                                       │
+│                              ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │ Step 9: POSTMORTEM                                             │  │
+│  │ Lambda: outageshield-postmortem-dev + Amazon Bedrock           │  │
+│  │ Action: Generates full postmortem report with:                 │  │
+│  │         - Summary, duration, root cause                        │  │
+│  │         - Impact assessment                                    │  │
+│  │         - Prevention recommendations (long-term)               │  │
+│  │ Writes: → outageshield-postmortems-dev                        │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                              │                                       │
+│                              ▼                                       │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │ Step 10: DONE                                                  │  │
+│  │ Workflow complete. All data stored in DynamoDB.                 │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
+            │
+            ▼
+┌─────────────────────────┐
+│   Dashboard API         │  Reads from all DynamoDB tables
+│   (09-dashboard-stack)  │  REST: /incidents, /risk, /postmortems, /events
+│                         │  WebSocket: real-time updates
+└───────────┬─────────────┘
+            │
+            ▼
+┌─────────────────────────┐
+│   React UI              │  CloudFront + S3
+│   (UI/src)              │  Dashboard, Incidents, Postmortems,
+│                         │  Notifications, Ticket Details
+└─────────────────────────┘
+```
+
+### DynamoDB Tables
+
+| Table | Purpose | Written By |
+|-------|---------|-----------|
+| `outageshield-events-dev` | Raw alarm events | Detection Lambda (Step 0) |
+| `outageshield-incidents-dev` | Enriched incidents (scores, root cause, recommendations, tickets, notifications) | Steps 1-8 |
+| `outageshield-workflow-state-dev` | Workflow execution tracking | Step Functions |
+| `outageshield-postmortems-dev` | AI postmortem reports with prevention steps | Postmortem Lambda (Step 9) |
+| `outageshield-runbooks-dev` | Remediation runbook templates | Manual / Config |
+
+---
+
 ## Demo Workflow
 
 ```
