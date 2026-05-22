@@ -51,6 +51,8 @@ Resources:
                     Fn::Sub: outageshield-reasoning-${Environment}-PostmortemLambdaArn
                   - !ImportValue
                     Fn::Sub: outageshield-remediation-${Environment}-ExecutorLambdaArn
+                  - !ImportValue
+                    Fn::Sub: outageshield-bedrock-agent-${Environment}-InvokerLambdaArn
               - Effect: Allow
                 Action:
                   - dynamodb:PutItem
@@ -126,12 +128,23 @@ Resources:
                   "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 10, "MaxAttempts": 5, "BackoffRate": 2.0}],
                   "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Fail_RootCause", "ResultPath": "$.error"}],
                   "ResultPath": "$.step3",
-                  "Next": "Step4_Remediation"
+                  "Next": "Step3b_AgentInvestigation"
                 },
                 "Fail_RootCause": {
                   "Type": "Pass",
                   "Result": {"status": "failed", "step": "root_cause"},
                   "ResultPath": "$.step3",
+                  "Next": "Step3b_AgentInvestigation"
+                },
+
+                "Step3b_AgentInvestigation": {
+                  "Type": "Task",
+                  "Comment": "3b. Bedrock Agent Deep Investigation: Autonomously searches past incidents, logs, runbooks, and deployments for deeper analysis.",
+                  "Resource": "${AgentInvokerArn}",
+                  "TimeoutSeconds": 120,
+                  "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 10, "MaxAttempts": 2}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Step4_Remediation", "ResultPath": "$.agent_error"}],
+                  "ResultPath": "$.step3b",
                   "Next": "Step4_Remediation"
                 },
 
@@ -236,6 +249,8 @@ Resources:
               Fn::Sub: outageshield-reasoning-${Environment}-RemediationLambdaArn
             RemediationExecutorArn: !ImportValue
               Fn::Sub: outageshield-remediation-${Environment}-ExecutorLambdaArn
+            AgentInvokerArn: !ImportValue
+              Fn::Sub: outageshield-bedrock-agent-${Environment}-InvokerLambdaArn
             TicketArn: !ImportValue
               Fn::Sub: outageshield-notifications-${Environment}-TicketLambdaArn
             NotificationArn: !ImportValue

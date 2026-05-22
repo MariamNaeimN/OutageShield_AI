@@ -347,6 +347,134 @@ Resources:
       LogGroupName: !Sub /aws/lambda/outageshield-agent-actions-${Environment}
       RetentionInDays: !Ref RetentionDays
 
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Agent Invoker Lambda — Called by Step Functions to run deep investigation
+  # ─────────────────────────────────────────────────────────────────────────────
+  AgentInvokerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub outageshield-agent-invoker-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AgentInvokerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeAgent
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: outageshield-storage-${Environment}-IncidentsTableArn
+
+  AgentInvokerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub outageshield-agent-invoker-${Environment}
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt AgentInvokerRole.Arn
+      Timeout: 120
+      MemorySize: 256
+      Environment:
+        Variables:
+          AGENT_ID: !GetAtt IncidentInvestigatorAgent.AgentId
+          AGENT_ALIAS_ID: TSTALIASID
+          INCIDENTS_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-IncidentsTableName
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import uuid
+
+          bedrock_agent = boto3.client('bedrock-agent-runtime')
+          dynamodb = boto3.resource('dynamodb')
+
+          AGENT_ID = os.environ.get('AGENT_ID', '')
+          AGENT_ALIAS_ID = os.environ.get('AGENT_ALIAS_ID', 'TSTALIASID')
+          INCIDENTS_TABLE = os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev')
+
+          def lambda_handler(event, context):
+              """
+              Invokes the Bedrock Agent to perform deep investigation on an incident.
+              Called by Step Functions after the RCA step.
+              """
+              signal = event.get('signal', {})
+              incident_id = signal.get('signal_id', '')
+              service = signal.get('service', 'unknown')
+              alarm_name = signal.get('alarm_name', '')
+
+              # Get root cause from previous step
+              step3 = event.get('step3', {})
+              root_causes = step3.get('root_causes', [])
+              root_cause = root_causes[0].get('description', 'Unknown') if root_causes else 'Unknown'
+
+              # Build investigation prompt
+              prompt = f"Investigate the incident on service {service}. The alarm is {alarm_name}. Initial root cause analysis suggests: {root_cause}. Search for similar past incidents, check logs, look up the runbook, and check recent deployments. Provide a full investigation summary."
+
+              try:
+                  # Invoke the Bedrock Agent
+                  response = bedrock_agent.invoke_agent(
+                      agentId=AGENT_ID,
+                      agentAliasId=AGENT_ALIAS_ID,
+                      sessionId=str(uuid.uuid4()),
+                      inputText=prompt
+                  )
+
+                  # Collect the agent's response
+                  completion = ''
+                  for event_stream in response.get('completion', []):
+                      if 'chunk' in event_stream:
+                          chunk = event_stream['chunk']
+                          if 'bytes' in chunk:
+                              completion += chunk['bytes'].decode('utf-8')
+
+                  print(f"Agent investigation complete for {incident_id}: {completion[:200]}")
+
+                  # Store investigation result in DynamoDB
+                  table = dynamodb.Table(INCIDENTS_TABLE)
+                  table.update_item(
+                      Key={'incident_id': incident_id},
+                      UpdateExpression='SET agent_investigation = :ai',
+                      ExpressionAttributeValues={':ai': completion[:2000]}
+                  )
+
+                  return {
+                      'statusCode': 200,
+                      'incident_id': incident_id,
+                      'investigation': completion[:2000],
+                      'status': 'completed'
+                  }
+
+              except Exception as e:
+                  print(f"Agent invocation failed: {e}")
+                  return {
+                      'statusCode': 200,
+                      'incident_id': incident_id,
+                      'investigation': f'Agent investigation skipped: {str(e)[:100]}',
+                      'status': 'skipped'
+                  }
+
+  AgentInvokerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/outageshield-agent-invoker-${Environment}
+      RetentionInDays: !Ref RetentionDays
+
 Outputs:
   AgentId:
     Description: Bedrock Agent ID
@@ -359,6 +487,12 @@ Outputs:
     Value: !GetAtt IncidentInvestigatorAgent.AgentArn
     Export:
       Name: !Sub outageshield-bedrock-agent-${Environment}-AgentArn
+
+  AgentInvokerLambdaArn:
+    Description: Agent Invoker Lambda ARN (called by Step Functions)
+    Value: !GetAtt AgentInvokerLambda.Arn
+    Export:
+      Name: !Sub outageshield-bedrock-agent-${Environment}-InvokerLambdaArn
 
   AgentActionLambdaArn:
     Description: Agent Action Lambda ARN
