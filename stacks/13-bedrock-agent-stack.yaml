@@ -139,6 +139,8 @@ Resources:
           EVENTS_TABLE: !ImportValue
             Fn::Sub: outageshield-storage-${Environment}-EventsTableName
           RUNBOOKS_TABLE: !Sub outageshield-runbooks-${Environment}
+          OPENSEARCH_ENDPOINT: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-OpenSearchEndpoint
       Code:
         ZipFile: |
           import json
@@ -150,6 +152,7 @@ Resources:
           INCIDENTS_TABLE = os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev')
           EVENTS_TABLE = os.environ.get('EVENTS_TABLE', 'outageshield-events-dev')
           RUNBOOKS_TABLE = os.environ.get('RUNBOOKS_TABLE', 'outageshield-runbooks-dev')
+          OPENSEARCH_ENDPOINT = os.environ.get('OPENSEARCH_ENDPOINT', '')
 
           def lambda_handler(event, context):
               """
@@ -224,33 +227,91 @@ Resources:
               }
 
           def search_logs(params):
-              """Search OpenSearch for log patterns related to the incident."""
+              """Search OpenSearch Serverless for log patterns related to the incident."""
               service = params.get('service', '')
               time_range = params.get('time_range', '1h')
 
-              # In production, this would query OpenSearch Serverless
-              # For now, search the events table for related events
-              table = dynamodb.Table(EVENTS_TABLE)
-              response = table.scan(
-                  FilterExpression=Attr('service').eq(service),
-                  Limit=20
-              )
-              events = response.get('Items', [])
+              opensearch_results = []
 
-              return {
-                  'service': service,
-                  'time_range': time_range,
-                  'total_log_entries': len(events),
-                  'patterns': [
+              # Try OpenSearch Serverless first
+              if OPENSEARCH_ENDPOINT:
+                  try:
+                      import urllib.request
+                      import urllib.error
+                      from botocore.auth import SigV4Auth
+                      from botocore.awsrequest import AWSRequest
+                      import botocore.session
+
+                      # Build OpenSearch query
+                      query = {
+                          "query": {
+                              "bool": {
+                                  "must": [
+                                      {"match": {"service": service}}
+                                  ]
+                              }
+                          },
+                          "size": 10,
+                          "sort": [{"timestamp": {"order": "desc"}}]
+                      }
+
+                      url = f"{OPENSEARCH_ENDPOINT}/outageshield-logs/_search"
+                      data = json.dumps(query).encode('utf-8')
+
+                      # Sign request with SigV4
+                      session = botocore.session.get_session()
+                      credentials = session.get_credentials().get_frozen_credentials()
+                      request = AWSRequest(method='POST', url=url, data=data, headers={'Content-Type': 'application/json'})
+                      SigV4Auth(credentials, 'aoss', 'us-east-1').add_auth(request)
+
+                      req = urllib.request.Request(url, data=data, method='POST')
+                      for key, val in dict(request.headers).items():
+                          req.add_header(key, val)
+
+                      response = urllib.request.urlopen(req)
+                      result = json.loads(response.read().decode())
+                      hits = result.get('hits', {}).get('hits', [])
+
+                      opensearch_results = [
+                          {
+                              'source': hit.get('_source', {}).get('source', 'opensearch'),
+                              'service': hit.get('_source', {}).get('service', service),
+                              'severity': hit.get('_source', {}).get('severity', 'unknown'),
+                              'message': hit.get('_source', {}).get('message', hit.get('_source', {}).get('alarm_name', '')),
+                              'timestamp': hit.get('_source', {}).get('timestamp', '')
+                          }
+                          for hit in hits
+                      ]
+                      print(f"OpenSearch returned {len(opensearch_results)} results for {service}")
+
+                  except Exception as e:
+                      print(f"OpenSearch query failed (falling back to DynamoDB): {e}")
+
+              # Fallback to DynamoDB events table
+              if not opensearch_results:
+                  table = dynamodb.Table(EVENTS_TABLE)
+                  response = table.scan(
+                      FilterExpression=Attr('service').eq(service),
+                      Limit=20
+                  )
+                  events = response.get('Items', [])
+                  opensearch_results = [
                       {
                           'event_id': evt.get('event_id', ''),
-                          'source': evt.get('source', ''),
+                          'source': evt.get('source', 'dynamodb'),
                           'severity': evt.get('severity', 'unknown'),
                           'message': evt.get('alarm_name', evt.get('title', '')),
                           'timestamp': evt.get('timestamp', '')
                       }
                       for evt in events[:10]
                   ]
+
+              return {
+                  'service': service,
+                  'time_range': time_range,
+                  'data_source': 'OpenSearch Serverless' if OPENSEARCH_ENDPOINT else 'DynamoDB Events',
+                  'total_log_entries': len(opensearch_results),
+                  'patterns': opensearch_results
               }
 
           def get_runbook(params):

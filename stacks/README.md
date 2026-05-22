@@ -134,3 +134,7 @@ Stacks communicate via CloudFormation exports. Key exports:
 - `outageshield-dashboard-{env}-ApiUrl`
 - `outageshield-bedrock-agent-{env}-AgentId`
 - `outageshield-bedrock-agent-{env}-AgentArn`
+
+
+
+C:\Users\mari8947\OneDrive - Rackspace Inc\Desktop\OutageShield AI\README.md update the End-to-End Flow for the current used
