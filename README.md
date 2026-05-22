@@ -122,6 +122,20 @@ Analyze operational data and automatically:
 │                              │                                              │
 │                              ▼                                              │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ STEP 3b: BEDROCK AGENT DEEP INVESTIGATION                              │ │
+│  │ Lambda: outageshield-agent-invoker-dev (13-bedrock-agent-stack)         │ │
+│  │ • Invokes Bedrock Agent (outageshield-investigator-dev)                │ │
+│  │ • Agent AUTONOMOUSLY decides which tools to call:                      │ │
+│  │   - /search-incidents → past incidents on same service (DynamoDB)      │ │
+│  │   - /search-logs → error patterns (OpenSearch/Events table)            │ │
+│  │   - /get-runbook → alarm-specific runbook (DynamoDB runbooks table)    │ │
+│  │   - /check-deployments → recent deploys and config changes             │ │
+│  │ • Agent performs multiple iterations until investigation is complete   │ │
+│  │ • Writes: agent_investigation → outageshield-incidents-dev             │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                              │                                              │
+│                              ▼                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
 │  │ STEP 4: REMEDIATION RECOMMENDATIONS                                    │ │
 │  │ Lambda: outageshield-remediation-dev (05-reasoning-stack)               │ │
 │  │ • Calls Amazon Bedrock to generate ranked remediation options           │ │
@@ -322,6 +336,7 @@ CloudWatch alarm → Detection Lambda → stores event → starts Step Functions
 → Step 1: Correlate (gather context)
 → Step 2: Score (Bedrock: severity 4, impact 8, revenue $50K/hr)
 → Step 3: RCA (Bedrock: "DB connection spike after deployment")
+→ Step 3b: Agent Investigation (searches past incidents, logs, runbook, deployments)
 → Step 4: Remediation (Bedrock: [{rollback, 85%}, {scale, 70%}])
 → Step 5: Approval gate (skipped — default path)
 → Step 6: Execute remediation (SSM — only if approved)
