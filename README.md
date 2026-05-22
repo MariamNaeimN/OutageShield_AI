@@ -381,3 +381,181 @@ All data is produced by the AI agent pipeline — **no mock data**.
 | Continuous Learning | Feed resolved outcomes back to improve AI accuracy |
 | Multi-account Support | Monitor across AWS accounts via Organizations |
 | Slack/PagerDuty Integration | Direct notification channels |
+
+---
+
+## Real-World Example: payments-api High Latency Incident
+
+Here's exactly what happens when a real incident flows through OutageShield AI:
+
+### 1. The Alert
+
+```
+CloudWatch Alarm: HighLatency-payments-api
+Reason: "Threshold Crossed: P99 latency (1200ms) > threshold (500ms)"
+Time: 2024-01-15 10:32:00 UTC
+```
+
+### 2. Detection (Step 0)
+
+The Detection Lambda receives the alarm event and:
+- Stores it in `outageshield-events-dev` with event_id, service=payments-api, alarm_name
+- Starts a Step Functions workflow execution
+
+### 3. Correlation (Step 1)
+
+The Correlation Lambda gathers context:
+- CloudWatch metrics: CPU at 45%, memory at 72%, request count spiked 3x
+- X-Ray traces: downstream calls to `database-proxy` taking 800ms (normally 50ms)
+- CloudTrail: deployment event 30 minutes ago (deploy v2.4.1)
+- AWS Config: connection pool size changed from 50 to 100
+
+Creates incident record: `INC-A1B2C3D4`
+
+### 4. Scoring (Step 2)
+
+Bedrock AI evaluates the incident:
+```json
+{
+  "severity_score": 4,
+  "business_impact_score": 8,
+  "revenue_at_risk": "High ($75,000 per hour)",
+  "affected_users": 15000,
+  "sla_status": "At Risk",
+  "scoring_reasoning": "payments-api is a critical revenue path. P99 latency 
+   of 1200ms will cause checkout timeouts, cart abandonment, and failed 
+   transactions. 15K active users affected during peak hours."
+}
+```
+
+### 5. Root Cause Analysis (Step 3)
+
+Bedrock AI analyzes all context and determines:
+```json
+{
+  "root_cause": "Database connection pool exhaustion following deployment v2.4.1. 
+   The new code introduced a connection leak in the payment processing handler, 
+   causing connections to accumulate without being released. This led to connection 
+   timeouts and cascading latency across all payment endpoints.",
+  "confidence": 87
+}
+```
+
+### 6. Bedrock Agent Deep Investigation (Step 3b)
+
+The Bedrock Agent is invoked and autonomously investigates:
+
+```
+Agent: "Let me search for similar past incidents..."
+  → /search-incidents (service=payments-api)
+  → Found: 2 similar incidents in the last 60 days, both after deployments
+
+Agent: "Let me check the logs..."
+  → /search-logs (service=payments-api, time_range=1h)
+  → Found: "Connection timeout" errors spiked from 0 to 340/min at 10:32
+
+Agent: "What does the runbook say?"
+  → /get-runbook (alarm_type=HighLatency)
+  → Got: "Check recent deployments, review DB connection pool, consider rollback"
+
+Agent: "Were there recent deployments?"
+  → /check-deployments (service=payments-api)
+  → Found: Deploy v2.4.1 at 10:02 — "Updated payment processing handler"
+
+Agent conclusion:
+  "This is the 3rd connection-related incident after a deployment in 60 days.
+   Deploy v2.4.1 introduced a connection leak. Immediate rollback to v2.3.9 
+   recommended. Long-term: add connection pool monitoring and pre-deploy 
+   load testing."
+```
+
+### 7. Remediation Recommendations (Step 4)
+
+Bedrock generates ranked options:
+```json
+[
+  {
+    "category": "rollback",
+    "description": "Rollback payments-api to v2.3.9 (last stable version)",
+    "confidence": 92,
+    "risk": "low",
+    "estimated_ttr": 5
+  },
+  {
+    "category": "scaling",
+    "description": "Increase database connection pool to 200 and add read replicas",
+    "confidence": 65,
+    "risk": "medium",
+    "estimated_ttr": 15
+  },
+  {
+    "category": "configuration_change",
+    "description": "Add connection timeout of 30s and idle connection cleanup",
+    "confidence": 55,
+    "risk": "low",
+    "estimated_ttr": 10
+  }
+]
+```
+
+### 8. Jira Ticket Created (Step 7)
+
+A ticket is created in Jira:
+```
+Project: TGSHLD
+Key: TGSHLD-456
+Priority: High
+Summary: [OutageShield] SEV-4 | payments-api | HighLatency-payments-api
+
+Description includes:
+- Incident details table (ID, service, severity, impact, revenue, users, SLA)
+- Root cause analysis with 87% confidence
+- Link to OutageShield Dashboard: https://d2k1km1tzlio49.cloudfront.net/incidents/INC-A1B2C3D4
+```
+
+### 9. SNS Alert Sent (Step 8)
+
+An escalation alert (SEV-4+) is sent to the SRE team:
+```
+Subject: [OutageShield] SEV-4 | payments-api | HighLatency-payments-api
+
+Body:
+  Service: payments-api
+  Severity: SEV-4
+  Root Cause: Database connection pool exhaustion following deployment v2.4.1
+  Revenue at Risk: $75,000/hr
+  Affected Users: 15,000
+  Jira Ticket: TGSHLD-456
+  Dashboard: https://d2k1km1tzlio49.cloudfront.net/incidents/INC-A1B2C3D4
+```
+
+### 10. Postmortem Generated (Step 9)
+
+Bedrock generates a full postmortem:
+```json
+{
+  "summary": "payments-api experienced 1200ms P99 latency for 45 minutes due to 
+   a connection pool leak introduced in deployment v2.4.1",
+  "duration": "45 minutes",
+  "root_cause": "Connection leak in payment processing handler (v2.4.1)",
+  "impact": "15,000 users affected. Estimated $56,250 revenue impact. 
+   Cart abandonment rate increased 340%. SLA breached for enterprise tier.",
+  "prevention": [
+    "Add connection pool monitoring with alerts at 80% utilization",
+    "Implement pre-deployment load testing in staging environment",
+    "Add circuit breaker pattern for database connections",
+    "Require connection leak testing in code review checklist",
+    "Set up canary deployments with automatic rollback on latency spike"
+  ]
+}
+```
+
+### 11. Dashboard Shows Everything
+
+The SRE team opens `https://d2k1km1tzlio49.cloudfront.net` and sees:
+- **Dashboard**: payments-api incident with SEV-4, business impact 8/10
+- **Incident Detail**: root cause, 87% confidence, 3 recommendations, Jira link
+- **Postmortem**: full report with 5 prevention steps
+- **Notifications**: SNS alert sent, Jira ticket TGSHLD-456 linked
+
+**Total time from alarm to full investigation: ~3 minutes** (vs. 30-60 minutes manually).
