@@ -92,25 +92,6 @@ export default function Dashboard() {
         <StatCard label="Raw Events" value={eventsCount} color="green" />
       </div>
 
-      {/* Raw Events vs Incidents Records */}
-      <div className="grid grid-cols-3 gap-4">
-        <div className="bg-[#161b22] border border-blue-900/60 rounded-xl p-4">
-          <p className="text-xs font-medium text-blue-400 mb-1">Raw Events (DynamoDB)</p>
-          <p className="text-3xl font-bold text-white">{eventsCount}</p>
-          <p className="text-[10px] text-gray-500 mt-1">outageshield-events-dev</p>
-        </div>
-        <div className="bg-[#161b22] border border-purple-900/60 rounded-xl p-4">
-          <p className="text-xs font-medium text-purple-400 mb-1">Incidents (DynamoDB)</p>
-          <p className="text-3xl font-bold text-white">{incidents.length}</p>
-          <p className="text-[10px] text-gray-500 mt-1">outageshield-incidents-dev</p>
-        </div>
-        <div className="bg-[#161b22] border border-yellow-900/60 rounded-xl p-4">
-          <p className="text-xs font-medium text-yellow-400 mb-1">Difference</p>
-          <p className="text-3xl font-bold text-white">{eventsCount - incidents.length}</p>
-          <p className="text-[10px] text-gray-500 mt-1">{eventsCount > 0 ? `${Math.round(((eventsCount - incidents.length) / eventsCount) * 100)}% noise filtered` : 'No data'}</p>
-        </div>
-      </div>
-
       {/* Active Incidents Table */}
       <div>
         <div className="flex items-center justify-between mb-4">
