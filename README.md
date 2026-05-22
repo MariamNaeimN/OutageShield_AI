@@ -218,17 +218,26 @@ CloudWatch Alarm fires
 │                              │                                       │
 │                              ▼                                       │
 │  ┌───────────────────────────────────────────────────────────────┐  │
-│  │ Step 5: APPROVAL GATE                                          │  │
-│  │ Action: Checks if auto-remediation is enabled                  │  │
-│  │         If yes → wait for human approval (waitForTaskToken)    │  │
-│  │         If no  → skip to ticket creation                       │  │
+│  │ Step 5: APPROVAL GATE ⚠️ FUTURE FEATURE                       │  │
+│  │ Action: Checks $.signal.auto_remediation_enabled               │  │
+│  │         If true → pause workflow (waitForTaskToken) until       │  │
+│  │                    human approves/rejects via dashboard or API  │  │
+│  │         If false/missing (current default) → skip to Step 7    │  │
+│  │                                                                │  │
+│  │ NOTE: Currently all incidents skip this step (auto_remediation │  │
+│  │ is not set in alarm events). In production, this will enable   │  │
+│  │ human-in-the-loop approval before executing remediation.       │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 │                              │                                       │
 │                              ▼                                       │
 │  ┌───────────────────────────────────────────────────────────────┐  │
-│  │ Step 6: EXECUTE REMEDIATION                                    │  │
+│  │ Step 6: EXECUTE REMEDIATION ⚠️ FUTURE FEATURE                  │  │
 │  │ Action: Calls AWS Systems Manager to execute approved action   │  │
 │  │         (rollback deployment, scale service, update config)    │  │
+│  │                                                                │  │
+│  │ NOTE: Currently a pass-through. In production, will integrate  │  │
+│  │ with SSM Run Command / Automation to perform actual rollbacks, │  │
+│  │ scaling operations, or configuration changes.                  │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 │                              │                                       │
 │                              ▼                                       │
