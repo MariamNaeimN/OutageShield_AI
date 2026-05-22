@@ -49,6 +49,8 @@ Resources:
                     Fn::Sub: outageshield-notifications-${Environment}-TicketLambdaArn
                   - !ImportValue
                     Fn::Sub: outageshield-reasoning-${Environment}-PostmortemLambdaArn
+                  - !ImportValue
+                    Fn::Sub: outageshield-remediation-${Environment}-ExecutorLambdaArn
               - Effect: Allow
                 Action:
                   - dynamodb:PutItem
@@ -172,9 +174,12 @@ Resources:
                 },
 
                 "Step6_Execute": {
-                  "Type": "Pass",
-                  "Comment": "6. Execute Remediation: In production calls Systems Manager. For demo, marks as executed.",
-                  "Result": {"status": "executed", "action": "rollback"},
+                  "Type": "Task",
+                  "Comment": "6. Execute Remediation: Calls Remediation Executor Lambda which uses AWS Systems Manager to perform rollback, scaling, or config changes.",
+                  "Resource": "${RemediationExecutorArn}",
+                  "TimeoutSeconds": 300,
+                  "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 10, "MaxAttempts": 2}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Step7_CreateTicket", "ResultPath": "$.remediation_error"}],
                   "ResultPath": "$.step6",
                   "Next": "Step7_CreateTicket"
                 },
@@ -229,6 +234,8 @@ Resources:
               Fn::Sub: outageshield-reasoning-${Environment}-RootCauseLambdaArn
             RemediationArn: !ImportValue
               Fn::Sub: outageshield-reasoning-${Environment}-RemediationLambdaArn
+            RemediationExecutorArn: !ImportValue
+              Fn::Sub: outageshield-remediation-${Environment}-ExecutorLambdaArn
             TicketArn: !ImportValue
               Fn::Sub: outageshield-notifications-${Environment}-TicketLambdaArn
             NotificationArn: !ImportValue

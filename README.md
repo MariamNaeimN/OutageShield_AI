@@ -149,6 +149,7 @@ OutageShield AI/
 | AWS Lambda | Detection, correlation, scoring, RCA, remediation, ticket, notify, postmortem, dashboard |
 | AWS Step Functions | 10-step incident workflow orchestration (X-Ray enabled) |
 | Amazon Bedrock | Claude 3 Haiku — root-cause analysis, scoring, remediation, postmortem |
+| Amazon Bedrock Agents | ⚠️ Future: orchestrate incident investigation workflow (currently Step Functions) |
 | Amazon DynamoDB | 5 tables: events, incidents, runbooks, workflow-state, postmortems |
 | Amazon OpenSearch Serverless | Log search and incident correlation |
 | AWS Systems Manager | Execute approved remediation actions |
@@ -231,13 +232,16 @@ CloudWatch Alarm fires
 │                              │                                       │
 │                              ▼                                       │
 │  ┌───────────────────────────────────────────────────────────────┐  │
-│  │ Step 6: EXECUTE REMEDIATION ⚠️ FUTURE FEATURE                  │  │
+│  │ Step 6: EXECUTE REMEDIATION                                    │  │
+│  │ Lambda: outageshield-remediation-executor-dev                  │  │
 │  │ Action: Calls AWS Systems Manager to execute approved action   │  │
-│  │         (rollback deployment, scale service, update config)    │  │
+│  │         - Rollback: SSM SendCommand to target instances        │  │
+│  │         - Scaling: Updates Auto Scaling Group capacity          │  │
+│  │         - Config: SSM SendCommand with config update scripts   │  │
+│  │ Writes: remediation result → outageshield-incidents-dev        │  │
 │  │                                                                │  │
-│  │ NOTE: Currently a pass-through. In production, will integrate  │  │
-│  │ with SSM Run Command / Automation to perform actual rollbacks, │  │
-│  │ scaling operations, or configuration changes.                  │  │
+│  │ NOTE: Only executes when Step 5 approval gate is passed.       │  │
+│  │ Currently requires auto_remediation_enabled=true in signal.    │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 │                              │                                       │
 │                              ▼                                       │
@@ -397,3 +401,17 @@ Tech stack: Vite + React 18 + TypeScript + Tailwind CSS + Recharts + Lucide Icon
 - ✅ User can view outage risk, business impact, and incident status in dashboard
 - ✅ System can create tickets and generate incident/postmortem summaries
 - ✅ System runs on AWS using CloudWatch, X-Ray, CloudTrail, Config, OpenSearch, Bedrock, Lambda, Step Functions, EventBridge, DynamoDB, Systems Manager, SNS, and ticketing integrations
+
+---
+
+## Future Roadmap
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Amazon Bedrock Agents | 🔮 Planned | Replace Step Functions orchestration with Bedrock Agents for more autonomous incident investigation |
+| Human-in-the-Loop Approval (Step 5) | 🔮 Planned | Enable `auto_remediation_enabled` flag to pause workflow and wait for human approval via dashboard |
+| Auto-Remediation Execution (Step 6) | 🔮 Planned | Integrate with AWS Systems Manager to execute rollbacks, scaling, and config changes automatically |
+| Continuous Learning | 🔮 Planned | Feed resolved incident outcomes back to improve scoring and root cause accuracy |
+| Multi-account Support | 🔮 Planned | Monitor incidents across multiple AWS accounts via Organizations |
+| Slack/PagerDuty Integration | 🔮 Planned | Direct notification channels beyond SNS email |
+| Runbook Automation | 🔮 Planned | Map incidents to SSM Automation documents for guided remediation |
