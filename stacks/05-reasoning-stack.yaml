@@ -261,12 +261,17 @@ Resources:
           def lambda_handler(event, context):
               """
               Reasoning Agent - Remediation Recommendations:
-              Generates ranked remediation actions based on root causes.
+              Generates ranked remediation actions based on root causes
+              AND the Bedrock Agent's deep investigation findings (Step 3b).
               """
               root_causes = event.get('root_causes', [])
               incident_context = event.get('incident_context', {})
 
-              prompt = build_remediation_prompt(root_causes, incident_context)
+              # Get agent investigation from Step 3b
+              step3b = event.get('step3b', {})
+              agent_investigation = step3b.get('investigation', '')
+
+              prompt = build_remediation_prompt(root_causes, incident_context, agent_investigation)
               response = invoke_bedrock(prompt)
               recommendations = parse_recommendations(response)
 
@@ -275,19 +280,44 @@ Resources:
                   'recommendations': recommendations
               }
 
-          def build_remediation_prompt(root_causes, context):
-              return f"""Based on the following root causes, generate remediation recommendations.
-              For each recommendation provide:
-              1. Action category (rollback, scaling, configuration_change, manual_intervention)
-              2. Description
-              3. Effectiveness score (1-5)
-              4. Risk level (low, medium, high)
-              5. Estimated time to resolution in minutes
+          def build_remediation_prompt(root_causes, context, agent_investigation):
+              prompt = f"""You are a Site Reliability Engineer generating remediation recommendations.
 
-              Root Causes: {json.dumps(root_causes)}
-              Service: {context.get('service')}
+              STRICT RULES:
+              - Only recommend actions that are directly supported by the evidence provided below.
+              - Do NOT invent or assume information not present in the data.
+              - If the evidence is insufficient, recommend "manual_intervention" with a note to investigate further.
+              - Base your confidence scores ONLY on how well the evidence supports each recommendation.
+              - Explain your reasoning for each recommendation citing specific evidence.
 
-              Return as JSON array ranked by effectiveness."""
+              EVIDENCE FROM ROOT CAUSE ANALYSIS:
+              {json.dumps(root_causes)}
+
+              SERVICE: {context.get('service', 'unknown')}
+              """
+
+              if agent_investigation:
+                  prompt += f"""
+              EVIDENCE FROM BEDROCK AGENT DEEP INVESTIGATION:
+              The following is the result of an autonomous investigation that searched past incidents,
+              logs, runbooks, and deployment history:
+              {agent_investigation[:3000]}
+              """
+
+              prompt += """
+              For each recommendation provide a JSON object with:
+              1. "category": one of (rollback, scaling, configuration_change, manual_intervention)
+              2. "description": what to do
+              3. "reasoning": WHY this is recommended based on the evidence above (cite specific findings)
+              4. "effectiveness": score 1-5 based on evidence strength
+              5. "risk": (low, medium, high)
+              6. "estimated_ttr_minutes": estimated time to resolve
+              7. "confidence": percentage (0-100) based on how strongly the evidence supports this action
+              8. "evidence": the specific data point that supports this recommendation
+
+              Return as a JSON array ranked by effectiveness. Maximum 4 recommendations."""
+
+              return prompt
 
           def invoke_bedrock(prompt):
               response = bedrock.invoke_model(
@@ -303,11 +333,23 @@ Resources:
 
           def parse_recommendations(response_text):
               try:
-                  recs = json.loads(response_text)
-                  return sorted(recs, key=lambda x: x.get('effectiveness', 0), reverse=True)
-              except json.JSONDecodeError:
-                  return [{'category': 'manual_intervention', 'description': response_text,
-                           'effectiveness': 3, 'risk': 'medium', 'estimated_ttr_minutes': 30}]
+                  # Try to extract JSON from the response
+                  text = response_text.strip()
+                  if text.startswith('['):
+                      recs = json.loads(text)
+                  else:
+                      start = text.find('[')
+                      end = text.rfind(']') + 1
+                      if start >= 0 and end > start:
+                          recs = json.loads(text[start:end])
+                      else:
+                          raise ValueError("No JSON array found")
+                  return sorted(recs, key=lambda x: x.get('effectiveness', 0), reverse=True)[:4]
+              except (json.JSONDecodeError, ValueError):
+                  return [{'category': 'manual_intervention', 'description': response_text[:500],
+                           'reasoning': 'Could not parse structured recommendations',
+                           'effectiveness': 3, 'risk': 'medium', 'estimated_ttr_minutes': 30,
+                           'confidence': 50, 'evidence': 'Raw AI response'}]
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Severity & Impact Scoring Lambda
