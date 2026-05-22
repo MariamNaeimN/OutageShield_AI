@@ -9,10 +9,14 @@
 | 3 | Ingestion | `01-ingestion-stack.yaml` | EventBridge rules + Ingestion Lambda |
 | 4 | Detection | `03-detection-stack.yaml` | Detection Lambda + Outage Signal bus |
 | 5 | Correlation | `04-correlation-stack.yaml` | Correlation Lambda (context builder) |
-| 6 | Reasoning | `05-reasoning-stack.yaml` | Bedrock Agent + Root Cause + Remediation + Scoring + Postmortem Lambdas |
-| 7 | Orchestration | `06-orchestration-stack.yaml` | Step Functions state machine |
+| 6 | Reasoning | `05-reasoning-stack.yaml` | Bedrock AI — Root Cause + Remediation + Scoring + Postmortem Lambdas |
+| 7 | Orchestration | `06-orchestration-stack.yaml` | Step Functions state machine (10-step workflow) |
 | 8 | Remediation | `08-remediation-stack.yaml` | Remediation Executor Lambda + SSM Documents |
 | 9 | Dashboard | `09-dashboard-stack.yaml` | API Gateway + Dashboard API Lambda |
+| 10 | Auth | `10-auth-stack.yaml` | Amazon Cognito (user pool + app client) |
+| 11 | WebSocket | `11-websocket-stack.yaml` | WebSocket API (real-time streaming) |
+| 12 | CloudFront | `12-cloudfront-stack.yaml` | S3 + CloudFront (UI hosting) |
+| 13 | Bedrock Agent | `13-bedrock-agent-stack.yaml` | Autonomous incident investigation agent + Action Groups |
 
 ## Dependency Graph
 
@@ -38,14 +42,21 @@
                           ▼
                   ┌───────────────┐
                   │ Orchestration │ (06)
-                  └───────────────┘
+                  └───────┬───────┘
                           │
-               ┌──────────┴──────────┐
-               ▼                     ▼
-       ┌─────────────┐      ┌────────────┐
-       │ Remediation │      │ Dashboard  │
-       │    (08)     │      │   (09)     │
-       └─────────────┘      └────────────┘
+               ┌──────────┼──────────┐
+               ▼          ▼          ▼
+       ┌─────────────┐ ┌────────┐ ┌───────────────┐
+       │ Remediation │ │Dashboard│ │ Bedrock Agent │
+       │    (08)     │ │  (09)  │ │     (13)      │
+       └─────────────┘ └────┬───┘ └───────────────┘
+                            │
+                    ┌───────┼───────┐
+                    ▼       ▼       ▼
+              ┌──────┐ ┌────────┐ ┌──────────┐
+              │ Auth │ │WebSocket│ │CloudFront│
+              │ (10) │ │  (11)  │ │   (12)   │
+              └──────┘ └────────┘ └──────────┘
 ```
 
 ## Deployment
@@ -107,10 +118,19 @@ Stack-specific parameters:
 Stacks communicate via CloudFormation exports. Key exports:
 
 - `outageshield-storage-{env}-EventsTableName`
+- `outageshield-storage-{env}-EventsTableArn`
+- `outageshield-storage-{env}-IncidentsTableName`
 - `outageshield-storage-{env}-IncidentsTableArn`
 - `outageshield-storage-{env}-OpenSearchEndpoint`
 - `outageshield-notifications-{env}-TopicArn`
 - `outageshield-notifications-{env}-LambdaArn`
+- `outageshield-notifications-{env}-TicketLambdaArn`
 - `outageshield-reasoning-{env}-RootCauseLambdaArn`
+- `outageshield-reasoning-{env}-RemediationLambdaArn`
+- `outageshield-reasoning-{env}-ScoringLambdaArn`
+- `outageshield-reasoning-{env}-PostmortemLambdaArn`
+- `outageshield-remediation-{env}-ExecutorLambdaArn`
 - `outageshield-orchestration-{env}-StateMachineArn`
 - `outageshield-dashboard-{env}-ApiUrl`
+- `outageshield-bedrock-agent-{env}-AgentId`
+- `outageshield-bedrock-agent-{env}-AgentArn`
