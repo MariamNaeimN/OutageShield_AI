@@ -67,6 +67,10 @@ Resources:
                   - states:StartExecution
                 Resource:
                   - !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:outageshield-workflow-${Environment}
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource: '*'
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Detection Lambda Function
@@ -89,6 +93,8 @@ Resources:
             Fn::Sub: outageshield-storage-${Environment}-EventsTableName
           OUTAGE_SIGNAL_BUS: !Sub outageshield-signals-${Environment}
           STATE_MACHINE_ARN: !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:outageshield-workflow-${Environment}
+          OPENSEARCH_ENDPOINT: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-OpenSearchEndpoint
       Code:
         ZipFile: |
           import json
@@ -96,9 +102,11 @@ Resources:
           import os
           from datetime import datetime, timezone
           import uuid
+          import urllib.request
 
           stepfunctions = boto3.client('stepfunctions')
           STATE_MACHINE_ARN = os.environ['STATE_MACHINE_ARN']
+          OPENSEARCH_ENDPOINT = os.environ.get('OPENSEARCH_ENDPOINT', '')
 
           THRESHOLDS = {'latency_ms': 500, 'error_rate_pct': 5, 'cpu_pct': 85}
 
@@ -106,6 +114,7 @@ Resources:
               """
               Detection Engine: Evaluates events against thresholds.
               When anomaly detected, starts Step Functions workflow automatically.
+              Also indexes events into OpenSearch for log search and correlation.
               """
               signal = None
 
@@ -117,6 +126,8 @@ Resources:
                   signal = generate_signal(event, 'trace')
 
               if signal:
+                  # Index into OpenSearch for search and correlation
+                  index_to_opensearch(signal, event)
                   # Start the full incident investigation workflow
                   start_workflow(signal)
                   return {'statusCode': 200, 'workflow_started': True, 'signal_id': signal['signal_id']}
@@ -170,6 +181,45 @@ Resources:
                   print(f"Workflow started: {signal['signal_id']} → {response['executionArn']}")
               except Exception as e:
                   print(f"Failed to start workflow: {e}")
+
+          def index_to_opensearch(signal, raw_event):
+              """Index the detection event into OpenSearch Serverless for log search and correlation."""
+              if not OPENSEARCH_ENDPOINT:
+                  return
+              try:
+                  from botocore.auth import SigV4Auth
+                  from botocore.awsrequest import AWSRequest
+                  import botocore.session
+
+                  detail = raw_event.get('detail', {})
+                  doc = {
+                      'event_id': signal['signal_id'],
+                      'service': signal['service'],
+                      'detection_type': signal['detection_type'],
+                      'severity': signal['severity_score'],
+                      'alarm_name': detail.get('alarmName', ''),
+                      'reason': detail.get('state', {}).get('reason', ''),
+                      'source': raw_event.get('source', 'aws.cloudwatch'),
+                      'timestamp': signal['timestamp'],
+                      'message': detail.get('state', {}).get('reason', '')[:500]
+                  }
+
+                  url = f"{OPENSEARCH_ENDPOINT}/outageshield-logs/_doc/{signal['signal_id']}"
+                  data = json.dumps(doc).encode('utf-8')
+
+                  session = botocore.session.get_session()
+                  credentials = session.get_credentials().get_frozen_credentials()
+                  request = AWSRequest(method='PUT', url=url, data=data, headers={'Content-Type': 'application/json'})
+                  SigV4Auth(credentials, 'aoss', 'us-east-1').add_auth(request)
+
+                  req = urllib.request.Request(url, data=data, method='PUT')
+                  for key, val in dict(request.headers).items():
+                      req.add_header(key, val)
+
+                  urllib.request.urlopen(req)
+                  print(f"Indexed to OpenSearch: {signal['signal_id']}")
+              except Exception as e:
+                  print(f"OpenSearch indexing failed (non-blocking): {e}")
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Outage Signal EventBridge Bus
