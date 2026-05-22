@@ -50,6 +50,7 @@ OutageShield AI/
 │   ├── 10-auth-stack.yaml             ← Amazon Cognito (user pool + app client)
 │   ├── 11-websocket-stack.yaml        ← WebSocket API (real-time streaming)
 │   ├── 12-cloudfront-stack.yaml       ← S3 + CloudFront (UI hosting)
+│   ├── 13-bedrock-agent-stack.yaml    ← Bedrock Agent (autonomous investigation)
 │   ├── deploy.sh                      ← Deploy all stacks in order
 │   └── stepfunctions/
 │       ├── incident-workflow.asl.json  ← Full ASL definition
@@ -149,7 +150,7 @@ OutageShield AI/
 | AWS Lambda | Detection, correlation, scoring, RCA, remediation, ticket, notify, postmortem, dashboard |
 | AWS Step Functions | 10-step incident workflow orchestration (X-Ray enabled) |
 | Amazon Bedrock | Claude 3 Haiku — root-cause analysis, scoring, remediation, postmortem |
-| Amazon Bedrock Agents | ⚠️ Future: orchestrate incident investigation workflow (currently Step Functions) |
+| Amazon Bedrock Agents | Autonomous incident investigation agent with Action Groups (search incidents, logs, runbooks, deployments) |
 | Amazon DynamoDB | 5 tables: events, incidents, runbooks, workflow-state, postmortems |
 | Amazon OpenSearch Serverless | Log search and incident correlation |
 | AWS Systems Manager | Execute approved remediation actions |
@@ -408,9 +409,7 @@ Tech stack: Vite + React 18 + TypeScript + Tailwind CSS + Recharts + Lucide Icon
 
 | Feature | Status | Description |
 |---------|--------|-------------|
-| Amazon Bedrock Agents | 🔮 Planned | Replace Step Functions orchestration with Bedrock Agents for more autonomous incident investigation |
 | Human-in-the-Loop Approval (Step 5) | 🔮 Planned | Enable `auto_remediation_enabled` flag to pause workflow and wait for human approval via dashboard |
-| Auto-Remediation Execution (Step 6) | 🔮 Planned | Integrate with AWS Systems Manager to execute rollbacks, scaling, and config changes automatically |
 | Continuous Learning | 🔮 Planned | Feed resolved incident outcomes back to improve scoring and root cause accuracy |
 | Multi-account Support | 🔮 Planned | Monitor incidents across multiple AWS accounts via Organizations |
 | Slack/PagerDuty Integration | 🔮 Planned | Direct notification channels beyond SNS email |

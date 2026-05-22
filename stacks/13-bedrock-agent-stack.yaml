@@ -1,0 +1,511 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OutageShield AI - Bedrock Agent Stack
+  Autonomous incident investigation agent with Action Groups for
+  searching incident history, querying OpenSearch logs, and checking runbooks.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+  RetentionDays:
+    Type: Number
+    Default: 14
+
+Resources:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Bedrock Agent Execution Role
+  # ─────────────────────────────────────────────────────────────────────────────
+  BedrockAgentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub outageshield-bedrock-agent-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BedrockAgentPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-haiku-20240307-v1:0
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt AgentActionLambda.Arn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Bedrock Agent — Incident Investigator
+  # ─────────────────────────────────────────────────────────────────────────────
+  IncidentInvestigatorAgent:
+    Type: AWS::Bedrock::Agent
+    Properties:
+      AgentName: !Sub outageshield-investigator-${Environment}
+      AgentResourceRoleArn: !GetAtt BedrockAgentRole.Arn
+      FoundationModel: anthropic.claude-3-haiku-20240307-v1:0
+      IdleSessionTTLInSeconds: 600
+      Instruction: |
+        You are an expert Site Reliability Engineer (SRE) investigating cloud infrastructure incidents.
+        Your job is to autonomously investigate incidents by:
+
+        1. Searching incident history to find similar past incidents on the same service
+        2. Querying OpenSearch logs to find error patterns, stack traces, and anomalies
+        3. Checking runbooks for known remediation procedures
+        4. Analyzing deployment history to identify recent changes that may have caused the issue
+
+        When investigating an incident, you should:
+        - Start by searching for similar past incidents on the same service
+        - Look for log patterns around the time the incident was detected
+        - Check if there were recent deployments or configuration changes
+        - Cross-reference with runbooks for known solutions
+        - Provide a detailed investigation summary with findings and confidence level
+
+        Always provide structured output with:
+        - investigation_summary: What you found
+        - similar_incidents: Past incidents that match
+        - log_findings: Relevant log patterns
+        - deployment_correlation: Whether a recent deployment is likely the cause
+        - recommended_actions: What to do based on your investigation
+      Description: !Sub OutageShield AI Incident Investigator Agent (${Environment})
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Agent Action Group Lambda — Tools the agent can use
+  # ─────────────────────────────────────────────────────────────────────────────
+  AgentActionLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub outageshield-agent-action-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AgentActionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: outageshield-storage-${Environment}-IncidentsTableArn
+                  - !ImportValue
+                    Fn::Sub: outageshield-storage-${Environment}-EventsTableArn
+              - Effect: Allow
+                Action:
+                  - aoss:APIAccessAll
+                Resource: '*'
+
+  AgentActionLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub outageshield-agent-actions-${Environment}
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt AgentActionLambdaRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          INCIDENTS_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-IncidentsTableName
+          EVENTS_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-EventsTableName
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from boto3.dynamodb.conditions import Attr
+
+          dynamodb = boto3.resource('dynamodb')
+          INCIDENTS_TABLE = os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev')
+          EVENTS_TABLE = os.environ.get('EVENTS_TABLE', 'outageshield-events-dev')
+
+          def lambda_handler(event, context):
+              """
+              Bedrock Agent Action Group handler.
+              Routes to the appropriate tool based on the action group and API path.
+              """
+              print(f"Agent action event: {json.dumps(event)}")
+
+              action_group = event.get('actionGroup', '')
+              api_path = event.get('apiPath', '')
+              parameters = event.get('parameters', [])
+              request_body = event.get('requestBody', {})
+
+              # Extract parameters into a dict
+              params = {}
+              for p in parameters:
+                  params[p['name']] = p['value']
+
+              # Route to appropriate tool
+              if api_path == '/search-incidents':
+                  result = search_incident_history(params)
+              elif api_path == '/search-logs':
+                  result = search_logs(params)
+              elif api_path == '/get-runbook':
+                  result = get_runbook(params)
+              elif api_path == '/check-deployments':
+                  result = check_deployments(params)
+              else:
+                  result = {'error': f'Unknown action: {api_path}'}
+
+              # Return in Bedrock Agent expected format
+              return {
+                  'messageVersion': '1.0',
+                  'response': {
+                      'actionGroup': action_group,
+                      'apiPath': api_path,
+                      'httpMethod': 'GET',
+                      'httpStatusCode': 200,
+                      'responseBody': {
+                          'application/json': {
+                              'body': json.dumps(result)
+                          }
+                      }
+                  }
+              }
+
+          def search_incident_history(params):
+              """Search past incidents for the same service."""
+              service = params.get('service', '')
+              table = dynamodb.Table(INCIDENTS_TABLE)
+
+              response = table.scan(
+                  FilterExpression=Attr('service').eq(service),
+                  Limit=10
+              )
+              incidents = response.get('Items', [])
+
+              return {
+                  'service': service,
+                  'total_past_incidents': len(incidents),
+                  'incidents': [
+                      {
+                          'incident_id': inc.get('incident_id', ''),
+                          'title': inc.get('title', ''),
+                          'root_cause': inc.get('root_cause', 'Unknown'),
+                          'severity': int(inc.get('severity_score', 3)),
+                          'status': inc.get('status', 'Unknown'),
+                          'created_at': inc.get('created_at', '')
+                      }
+                      for inc in incidents[:5]
+                  ]
+              }
+
+          def search_logs(params):
+              """Search OpenSearch for log patterns related to the incident."""
+              service = params.get('service', '')
+              time_range = params.get('time_range', '1h')
+
+              # In production, this would query OpenSearch Serverless
+              # For now, search the events table for related events
+              table = dynamodb.Table(EVENTS_TABLE)
+              response = table.scan(
+                  FilterExpression=Attr('service').eq(service),
+                  Limit=20
+              )
+              events = response.get('Items', [])
+
+              return {
+                  'service': service,
+                  'time_range': time_range,
+                  'total_log_entries': len(events),
+                  'patterns': [
+                      {
+                          'event_id': evt.get('event_id', ''),
+                          'source': evt.get('source', ''),
+                          'severity': evt.get('severity', 'unknown'),
+                          'message': evt.get('alarm_name', evt.get('title', '')),
+                          'timestamp': evt.get('timestamp', '')
+                      }
+                      for evt in events[:10]
+                  ]
+              }
+
+          def get_runbook(params):
+              """Look up remediation runbook for the service/alarm type."""
+              service = params.get('service', '')
+              alarm_type = params.get('alarm_type', '')
+
+              # Runbook recommendations based on alarm type
+              runbooks = {
+                  'HighLatency': {
+                      'title': 'High Latency Runbook',
+                      'steps': [
+                          'Check recent deployments for the service',
+                          'Review database connection pool utilization',
+                          'Check downstream dependency health',
+                          'Consider rollback if latency started after deployment',
+                          'Scale horizontally if load-related'
+                      ]
+                  },
+                  'High5xxRate': {
+                      'title': '5xx Error Rate Runbook',
+                      'steps': [
+                          'Check application logs for stack traces',
+                          'Verify database connectivity',
+                          'Check memory and CPU utilization',
+                          'Review recent config changes',
+                          'Rollback last deployment if errors started after deploy'
+                      ]
+                  },
+                  'HighCPU': {
+                      'title': 'High CPU Runbook',
+                      'steps': [
+                          'Identify hot threads or processes',
+                          'Check for infinite loops or memory leaks',
+                          'Scale up instance size or add replicas',
+                          'Review recent code changes',
+                          'Enable CPU profiling for root cause'
+                      ]
+                  },
+                  'MemoryPressure': {
+                      'title': 'Memory Pressure Runbook',
+                      'steps': [
+                          'Check for memory leaks in application',
+                          'Review heap dump if available',
+                          'Restart affected instances',
+                          'Scale up memory allocation',
+                          'Check for cache overflow'
+                      ]
+                  },
+                  'DBConnExhaustion': {
+                      'title': 'Database Connection Exhaustion Runbook',
+                      'steps': [
+                          'Check for connection leaks in application code',
+                          'Increase connection pool size',
+                          'Add connection timeout settings',
+                          'Check for long-running queries',
+                          'Consider read replicas for read-heavy workloads'
+                      ]
+                  }
+              }
+
+              runbook = runbooks.get(alarm_type, {
+                  'title': f'General Runbook for {service}',
+                  'steps': [
+                      'Review CloudWatch metrics for anomalies',
+                      'Check recent deployments and config changes',
+                      'Review application logs for errors',
+                      'Check downstream dependencies',
+                      'Escalate to service owner if unresolved'
+                  ]
+              })
+
+              return {
+                  'service': service,
+                  'alarm_type': alarm_type,
+                  'runbook': runbook
+              }
+
+          def check_deployments(params):
+              """Check recent deployments for the service."""
+              service = params.get('service', '')
+
+              # In production, this would query CodeDeploy or deployment tracking
+              # For now, return simulated deployment data
+              return {
+                  'service': service,
+                  'recent_deployments': [
+                      {
+                          'deployment_id': f'deploy-{service[:8]}-001',
+                          'version': '2.4.1',
+                          'timestamp': '2024-01-15T10:30:00Z',
+                          'status': 'succeeded',
+                          'changes': 'Updated connection pool settings'
+                      }
+                  ],
+                  'config_changes': [
+                      {
+                          'change_id': f'config-{service[:8]}-001',
+                          'parameter': 'max_connections',
+                          'old_value': '50',
+                          'new_value': '100',
+                          'timestamp': '2024-01-15T09:00:00Z'
+                      }
+                  ]
+              }
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Lambda Permission for Bedrock Agent to invoke
+  # ─────────────────────────────────────────────────────────────────────────────
+  AgentActionLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt AgentActionLambda.Arn
+      Action: lambda:InvokeFunction
+      Principal: bedrock.amazonaws.com
+      SourceArn: !GetAtt IncidentInvestigatorAgent.AgentArn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Action Group — Investigation Tools
+  # ─────────────────────────────────────────────────────────────────────────────
+  InvestigationActionGroup:
+    Type: AWS::Bedrock::AgentActionGroup
+    Properties:
+      AgentId: !GetAtt IncidentInvestigatorAgent.AgentId
+      AgentVersion: DRAFT
+      ActionGroupName: IncidentInvestigationTools
+      ActionGroupExecutor:
+        Lambda: !GetAtt AgentActionLambda.Arn
+      ApiSchema:
+        Payload: |
+          {
+            "openapi": "3.0.0",
+            "info": {
+              "title": "OutageShield Incident Investigation Tools",
+              "version": "1.0.0",
+              "description": "Tools for autonomous incident investigation"
+            },
+            "paths": {
+              "/search-incidents": {
+                "get": {
+                  "operationId": "searchIncidentHistory",
+                  "summary": "Search past incidents for a service to find patterns and similar issues",
+                  "parameters": [
+                    {
+                      "name": "service",
+                      "in": "query",
+                      "required": true,
+                      "schema": {"type": "string"},
+                      "description": "Service name to search incidents for (e.g. payments-api, orders-service)"
+                    }
+                  ],
+                  "responses": {
+                    "200": {
+                      "description": "List of past incidents for the service",
+                      "content": {"application/json": {"schema": {"type": "object"}}}
+                    }
+                  }
+                }
+              },
+              "/search-logs": {
+                "get": {
+                  "operationId": "searchLogs",
+                  "summary": "Search OpenSearch logs for error patterns, stack traces, and anomalies related to the incident",
+                  "parameters": [
+                    {
+                      "name": "service",
+                      "in": "query",
+                      "required": true,
+                      "schema": {"type": "string"},
+                      "description": "Service name to search logs for"
+                    },
+                    {
+                      "name": "time_range",
+                      "in": "query",
+                      "required": false,
+                      "schema": {"type": "string", "default": "1h"},
+                      "description": "Time range to search (e.g. 1h, 6h, 24h)"
+                    }
+                  ],
+                  "responses": {
+                    "200": {
+                      "description": "Log entries and patterns found",
+                      "content": {"application/json": {"schema": {"type": "object"}}}
+                    }
+                  }
+                }
+              },
+              "/get-runbook": {
+                "get": {
+                  "operationId": "getRunbook",
+                  "summary": "Look up the remediation runbook for a specific service and alarm type",
+                  "parameters": [
+                    {
+                      "name": "service",
+                      "in": "query",
+                      "required": true,
+                      "schema": {"type": "string"},
+                      "description": "Service name"
+                    },
+                    {
+                      "name": "alarm_type",
+                      "in": "query",
+                      "required": true,
+                      "schema": {"type": "string"},
+                      "description": "Type of alarm (e.g. HighLatency, High5xxRate, HighCPU, MemoryPressure, DBConnExhaustion)"
+                    }
+                  ],
+                  "responses": {
+                    "200": {
+                      "description": "Runbook with remediation steps",
+                      "content": {"application/json": {"schema": {"type": "object"}}}
+                    }
+                  }
+                }
+              },
+              "/check-deployments": {
+                "get": {
+                  "operationId": "checkDeployments",
+                  "summary": "Check recent deployments and configuration changes for a service that may have caused the incident",
+                  "parameters": [
+                    {
+                      "name": "service",
+                      "in": "query",
+                      "required": true,
+                      "schema": {"type": "string"},
+                      "description": "Service name to check deployments for"
+                    }
+                  ],
+                  "responses": {
+                    "200": {
+                      "description": "Recent deployments and config changes",
+                      "content": {"application/json": {"schema": {"type": "object"}}}
+                    }
+                  }
+                }
+              }
+            }
+          }
+      Description: Tools for searching incidents, logs, runbooks, and deployments
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Log Group
+  # ─────────────────────────────────────────────────────────────────────────────
+  AgentActionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/outageshield-agent-actions-${Environment}
+      RetentionInDays: !Ref RetentionDays
+
+Outputs:
+  AgentId:
+    Description: Bedrock Agent ID
+    Value: !GetAtt IncidentInvestigatorAgent.AgentId
+    Export:
+      Name: !Sub outageshield-bedrock-agent-${Environment}-AgentId
+
+  AgentArn:
+    Description: Bedrock Agent ARN
+    Value: !GetAtt IncidentInvestigatorAgent.AgentArn
+    Export:
+      Name: !Sub outageshield-bedrock-agent-${Environment}-AgentArn
+
+  AgentActionLambdaArn:
+    Description: Agent Action Lambda ARN
+    Value: !GetAtt AgentActionLambda.Arn
+    Export:
+      Name: !Sub outageshield-bedrock-agent-${Environment}-ActionLambdaArn
