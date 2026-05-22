@@ -183,20 +183,6 @@ export default function TicketDetail() {
           </a>
         </div>
 
-        {/* Ticket URL */}
-        <div>
-          <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-1">Ticket URL</p>
-          <a
-            href={`${JIRA_BASE_URL}/browse/${incident.ticket?.id || ''}`}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex items-center gap-2 text-sm text-blue-400 hover:text-blue-300"
-          >
-            <ExternalLink className="w-3.5 h-3.5" />
-            {`${JIRA_BASE_URL}/browse/${incident.ticket?.id || ''}`}
-          </a>
-        </div>
-
         {/* Created */}
         {ticketContent.created_at && (
           <div className="pt-3 border-t border-gray-800/50">
