@@ -14,7 +14,7 @@ Analyze operational data and automatically:
 
 - Detect early outage signals
 - Correlate alerts, logs, telemetry, and deployment history
-- Identify likely root cause using Amazon Bedrock
+- Identify likely root cause
 - Recommend rollback, scaling, configuration, or remediation actions
 - Generate incident summaries and postmortem drafts
 - Trigger tickets or workflows in Jira
@@ -30,310 +30,305 @@ Analyze operational data and automatically:
 
 ---
 
+## AWS Architecture
+
+| Service | Stack | Role |
+|---------|-------|------|
+| Amazon CloudWatch | 01-ingestion, 03-detection | Metrics, logs, and alarms ingestion |
+| AWS X-Ray | All Lambdas + Step Functions | Application tracing (TracingConfig: Active) |
+| AWS CloudTrail | 04-correlation | API activity and change tracking |
+| AWS Config | 04-correlation | Configuration state and drift detection |
+| Amazon EventBridge | 01-ingestion | Event routing and incident triggers |
+| AWS Lambda | 03, 04, 05, 07, 08, 09, 13 | 10+ functions: detection, correlation, scoring, RCA, remediation, ticket, notify, postmortem, dashboard, agent actions |
+| AWS Step Functions | 06-orchestration | 10-step incident workflow orchestration (X-Ray enabled) |
+| Amazon Bedrock | 05-reasoning | Claude 3 Haiku — root-cause analysis, scoring, remediation, postmortem |
+| Amazon Bedrock Agents | 13-bedrock-agent | Autonomous incident investigation agent with Action Groups |
+| Amazon DynamoDB | 02-storage | 5 tables: events, incidents, runbooks, workflow-state, postmortems |
+| Amazon OpenSearch Serverless | 02-storage | Log search and incident correlation |
+| AWS Systems Manager | 08-remediation | Execute approved remediation (rollback, scale, config) via SSM Documents |
+| Amazon SNS | 07-notifications | Multi-channel notifications (alert + escalation topics) |
+| Amazon Cognito | 10-auth | User authentication (user pool + app client) |
+| API Gateway (REST) | 09-dashboard | Dashboard API: /incidents, /risk, /postmortems, /events, /approve |
+| API Gateway (WebSocket) | 11-websocket | Real-time incident streaming to UI |
+| Amazon S3 | 12-cloudfront | Static UI hosting |
+| Amazon CloudFront | 12-cloudfront | CDN for UI (HTTPS, SPA routing) |
+| Jira Cloud | 07-notifications | Ticket creation via REST API v3 with dashboard links |
+
+---
+
+## End-to-End Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              DATA SOURCES                                    │
+│                                                                             │
+│  CloudWatch Alarms    AWS X-Ray Traces    CloudTrail    AWS Config          │
+│       │                     │                 │              │              │
+└───────┴─────────────────────┴─────────────────┴──────────────┴──────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  INGESTION LAYER (01-ingestion-stack)                                       │
+│                                                                             │
+│  Amazon EventBridge Rule → routes CloudWatch alarm events to Detection      │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  DETECTION LAYER (03-detection-stack)                                       │
+│                                                                             │
+│  Lambda: outageshield-detection-dev                                         │
+│  • Receives CloudWatch alarm event                                          │
+│  • Stores raw event → outageshield-events-dev (DynamoDB)                    │
+│  • Starts Step Functions workflow execution                                  │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  ORCHESTRATION LAYER (06-orchestration-stack)                               │
+│  AWS Step Functions — 10-Step Incident Investigation Workflow                │
+│                                                                             │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ STEP 1: CORRELATE                                                      │ │
+│  │ Lambda: outageshield-correlation-dev (04-correlation-stack)             │ │
+│  │ • Gathers logs, metrics, X-Ray traces, deployments, config changes     │ │
+│  │ • Creates incident record in outageshield-incidents-dev                 │ │
+│  │ • Sets workflow_step = 'correlating'                                    │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                              │                                              │
+│                              ▼                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ STEP 2: SCORE                                                          │ │
+│  │ Lambda: outageshield-scoring-dev (05-reasoning-stack)                   │ │
+│  │ • Calls Amazon Bedrock (Claude 3 Haiku) to evaluate:                   │ │
+│  │   - severity_score (1-5)                                               │ │
+│  │   - business_impact_score (1-10)                                       │ │
+│  │   - revenue_at_risk (dollar estimate)                                  │ │
+│  │   - affected_users (count)                                             │ │
+│  │   - sla_status (On Track / At Risk / Breached)                         │ │
+│  │   - service_risk_score (0-100)                                         │ │
+│  │   - scoring_reasoning (AI explanation)                                 │ │
+│  │ • Writes all scores → outageshield-incidents-dev                       │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                              │                                              │
+│                              ▼                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ STEP 3: ROOT CAUSE ANALYSIS                                            │ │
+│  │ Lambda: outageshield-root-cause-dev (05-reasoning-stack)                │ │
+│  │ • Calls Amazon Bedrock with all incident context                       │ │
+│  │ • Identifies probable root cause with confidence percentage            │ │
+│  │ • Writes: root_cause, confidence → outageshield-incidents-dev          │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                              │                                              │
+│                              ▼                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ STEP 4: REMEDIATION RECOMMENDATIONS                                    │ │
+│  │ Lambda: outageshield-remediation-dev (05-reasoning-stack)               │ │
+│  │ • Calls Amazon Bedrock to generate ranked remediation options           │ │
+│  │ • Each option includes: category, description, confidence,             │ │
+│  │   risk level, estimated time to resolve                                │ │
+│  │ • Categories: rollback, scaling, configuration_change,                 │ │
+│  │   manual_intervention                                                  │ │
+│  │ • Writes: recommendations_raw (JSON) → outageshield-incidents-dev      │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                              │                                              │
+│                              ▼                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ STEP 5: APPROVAL GATE                                                  │ │
+│  │ Type: Choice (no Lambda)                                               │ │
+│  │ • Checks: $.signal.auto_remediation_enabled                            │ │
+│  │ • If true → Step 5b: Await human approval (waitForTaskToken)           │ │
+│  │ • If false/missing (default) → Skip to Step 7                          │ │
+│  │                                                                        │ │
+│  │ NOTE: Currently all incidents skip to Step 7 because                   │ │
+│  │ auto_remediation_enabled is not set in alarm events.                   │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                              │                                              │
+│                              ▼                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ STEP 6: EXECUTE REMEDIATION                                            │ │
+│  │ Lambda: outageshield-remediation-executor-dev (08-remediation-stack)    │ │
+│  │ • Calls AWS Systems Manager (SSM SendCommand)                          │ │
+│  │ • Supports:                                                            │ │
+│  │   - Rollback: SSM RunShellScript on tagged instances                   │ │
+│  │   - Scaling: UpdateAutoScalingGroup (increase capacity)                │ │
+│  │   - Config change: SSM RunShellScript with config commands             │ │
+│  │ • SSM Documents: OutageShield-Rollback-dev, OutageShield-ScaleUp-dev   │ │
+│  │ • On failure: sends SNS alert about remediation failure                │ │
+│  │                                                                        │ │
+│  │ NOTE: Only executes when Step 5 approval is passed.                    │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                              │                                              │
+│                              ▼                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ STEP 7: CREATE JIRA TICKET                                             │ │
+│  │ Lambda: outageshield-ticket-integrator-dev (07-notifications-stack)     │ │
+│  │ • Gets Jira credentials from AWS Secrets Manager                       │ │
+│  │ • Creates ticket via Jira REST API v3 (Atlassian Document Format)      │ │
+│  │ • Ticket includes: incident details table, root cause, alarm info,     │ │
+│  │   OutageShield dashboard link (clickable)                              │ │
+│  │ • Writes: ticket_id, ticket_system, ticket_status, ticket_url,         │ │
+│  │   ticket_content → outageshield-incidents-dev                          │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                              │                                              │
+│                              ▼                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ STEP 8: NOTIFY TEAM                                                    │ │
+│  │ Lambda: outageshield-notification-dev (07-notifications-stack)          │ │
+│  │ • Sends SNS notification:                                              │ │
+│  │   - SEV-4+ → Escalation topic                                         │ │
+│  │   - SEV-1-3 → Alert topic                                             │ │
+│  │ • Message includes: service, severity, root cause, revenue at risk,    │ │
+│  │   ticket ID, ticket URL, dashboard link                                │ │
+│  │ • Writes: notifications (JSON) → outageshield-incidents-dev            │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                              │                                              │
+│                              ▼                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ STEP 9: GENERATE POSTMORTEM                                            │ │
+│  │ Lambda: outageshield-postmortem-dev (05-reasoning-stack)                │ │
+│  │ • Calls Amazon Bedrock to generate full postmortem report              │ │
+│  │ • Output includes:                                                     │ │
+│  │   - summary (what happened)                                            │ │
+│  │   - duration (how long)                                                │ │
+│  │   - root_cause (why it happened)                                       │ │
+│  │   - impact (who was affected)                                          │ │
+│  │   - prevention[] (how to prevent it next time)                         │ │
+│  │ • Writes → outageshield-postmortems-dev (separate table)               │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                              │                                              │
+│                              ▼                                              │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ STEP 10: DONE                                                          │ │
+│  │ Workflow complete. All data stored in DynamoDB.                         │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  BEDROCK AGENT (13-bedrock-agent-stack) — Autonomous Investigation          │
+│                                                                             │
+│  Agent: outageshield-investigator-dev                                       │
+│  Model: Claude 3 Haiku                                                      │
+│  Role: Supplementary deep investigation (invoked on demand)                 │
+│                                                                             │
+│  Action Groups (tools the agent can call autonomously):                     │
+│  ┌─────────────────────────────────────────────────────────────────────┐   │
+│  │ /search-incidents  → Query DynamoDB for past incidents on service   │   │
+│  │ /search-logs       → Query OpenSearch/Events for error patterns     │   │
+│  │ /get-runbook       → Look up alarm-specific remediation runbook     │   │
+│  │ /check-deployments → Check recent deployments and config changes    │   │
+│  └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                             │
+│  The agent decides ON ITS OWN which tools to call and how many              │
+│  iterations to perform. Can be invoked via:                                 │
+│  • AWS Bedrock Console (test)                                               │
+│  • AWS SDK (bedrock-agent-runtime:InvokeAgent)                              │
+│  • Any Lambda or API endpoint                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  DASHBOARD LAYER (09-dashboard-stack + 11-websocket + 12-cloudfront)        │
+│                                                                             │
+│  API Gateway (REST): /incidents, /risk, /postmortems, /events, /approve     │
+│  API Gateway (WebSocket): Real-time incident updates                        │
+│  Lambda: outageshield-dashboard-dev — reads from all DynamoDB tables        │
+│                                                                             │
+│  React UI (CloudFront + S3):                                                │
+│  • Dashboard — stats, business impact bars, donut chart, incidents table    │
+│  • Incidents — full list with search, severity, status, root cause          │
+│  • Incident Detail — root cause + confidence, recommendations,             │
+│    postmortem link, Jira ticket, SNS notification, business details         │
+│  • Postmortems — master-detail with scoring reasoning, prevention steps    │
+│  • Notifications — Jira tickets (external link) + SNS alerts               │
+│  • Login — Cognito authentication                                           │
+│                                                                             │
+│  Live: https://d2k1km1tzlio49.cloudfront.net                                │
+│  Jira: https://corpinfollc.atlassian.net/jira/software/projects/TGSHLD     │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## DynamoDB Tables
+
+| Table | Records | Written By | Contains |
+|-------|---------|-----------|----------|
+| `outageshield-events-dev` | Raw alarm events | Detection Lambda | event_id, source, service, alarm_name, severity, timestamp |
+| `outageshield-incidents-dev` | Enriched incidents | Steps 1-8 | All scores, root cause, recommendations, ticket, notifications |
+| `outageshield-workflow-state-dev` | Workflow tracking | Step Functions | execution_id, status, timestamps |
+| `outageshield-postmortems-dev` | AI postmortems | Postmortem Lambda (Step 9) | summary, duration, root_cause, impact, prevention[] |
+| `outageshield-runbooks-dev` | Runbook templates | Manual / Config | service, alarm_type, steps[] |
+
+---
+
 ## Project Structure
 
 ```
 OutageShield AI/
-│
-├── README.md
-│
-├── stacks/                            ← AWS CloudFormation (13 stacks)
-│   ├── 01-ingestion-stack.yaml        ← EventBridge + Ingestion Lambda
-│   ├── 02-storage-stack.yaml          ← DynamoDB (5 tables) + OpenSearch Serverless
-│   ├── 03-detection-stack.yaml        ← Detection Lambda + X-Ray tracing
-│   ├── 04-correlation-stack.yaml      ← Correlation Lambda (context builder)
-│   ├── 05-reasoning-stack.yaml        ← Bedrock AI (RCA, remediation, scoring, postmortem)
-│   ├── 06-orchestration-stack.yaml    ← Step Functions (10-step workflow + X-Ray)
+├── stacks/                            ← 13 AWS CloudFormation stacks
+│   ├── 01-ingestion-stack.yaml        ← EventBridge rules
+│   ├── 02-storage-stack.yaml          ← DynamoDB (5 tables) + OpenSearch
+│   ├── 03-detection-stack.yaml        ← Detection Lambda + X-Ray
+│   ├── 04-correlation-stack.yaml      ← Correlation Lambda
+│   ├── 05-reasoning-stack.yaml        ← Bedrock AI (4 Lambdas: scoring, RCA, remediation, postmortem)
+│   ├── 06-orchestration-stack.yaml    ← Step Functions (10-step workflow)
 │   ├── 07-notifications-stack.yaml    ← SNS + Notification Lambda + Jira Ticket Lambda
-│   ├── 08-remediation-stack.yaml      ← Remediation Executor Lambda + SSM Documents
-│   ├── 09-dashboard-stack.yaml        ← API Gateway + Dashboard API Lambda
-│   ├── 10-auth-stack.yaml             ← Amazon Cognito (user pool + app client)
-│   ├── 11-websocket-stack.yaml        ← WebSocket API (real-time streaming)
-│   ├── 12-cloudfront-stack.yaml       ← S3 + CloudFront (UI hosting)
-│   ├── 13-bedrock-agent-stack.yaml    ← Bedrock Agent (autonomous investigation)
-│   ├── deploy.sh                      ← Deploy all stacks in order
+│   ├── 08-remediation-stack.yaml      ← Remediation Executor + SSM Documents
+│   ├── 09-dashboard-stack.yaml        ← API Gateway + Dashboard Lambda
+│   ├── 10-auth-stack.yaml             ← Amazon Cognito
+│   ├── 11-websocket-stack.yaml        ← WebSocket API
+│   ├── 12-cloudfront-stack.yaml       ← S3 + CloudFront
+│   ├── 13-bedrock-agent-stack.yaml    ← Bedrock Agent + Action Group Lambda
+│   ├── deploy.sh
 │   └── stepfunctions/
-│       ├── incident-workflow.asl.json  ← Full ASL definition
-│       ├── approval-lambda.py         ← Human approval callback
-│       └── README.md                  ← Workflow documentation
-│
-├── UI/                                ← React Incident Command Dashboard
-│   ├── src/
-│   │   ├── components/                ← Layout, SeverityBadge, StatusBadge, RiskIndicator
-│   │   ├── pages/                     ← Dashboard, Incidents, IncidentDetail,
-│   │   │                                 Postmortems, Notifications, TicketDetail, SnsDetail, Login
-│   │   ├── services/
-│   │   │   ├── api.ts                 ← REST API client (incidents, risk, postmortems, events)
-│   │   │   ├── auth.ts               ← Cognito authentication
-│   │   │   └── websocket.ts          ← WebSocket real-time updates
-│   │   └── hooks/useRealtime.ts
-│   ├── public/favicon.svg
-│   ├── package.json
-│   ├── tailwind.config.js
-│   ├── vite.config.ts
-│   └── tsconfig.json
-│
+│       ├── incident-workflow.asl.json
+│       ├── approval-lambda.py
+│       └── README.md
+├── UI/                                ← React Dashboard (Vite + TypeScript + Tailwind)
+│   └── src/
+│       ├── pages/                     ← Dashboard, Incidents, IncidentDetail, Postmortems,
+│       │                                 Notifications, TicketDetail, SnsDetail, Login
+│       ├── services/api.ts            ← REST API client
+│       ├── services/auth.ts           ← Cognito auth
+│       └── services/websocket.ts      ← Real-time updates
 ├── scripts/
-│   ├── run-demo-60.py                 ← Clear tables + trigger 100 incidents
-│   ├── push-100.py                    ← Push 100 incidents (no clear)
-│   ├── delete-jira-tickets.py         ← Delete all Jira tickets in TGSHLD project
-│   ├── clean-and-push-100.py          ← Full reset: stop workflows, clear DB, delete Jira, push 100
-│   ├── delete-all.sh                  ← Delete all AWS resources
-│   └── setup-opensearch-indexes.py    ← OpenSearch index setup
-│
+│   ├── push-100.py                    ← Trigger 100 incidents
+│   ├── delete-jira-tickets.py         ← Delete all Jira tickets
+│   ├── clean-and-push-100.py          ← Full reset + push
+│   └── delete-all.sh                  ← Delete all AWS resources
 └── docs/
-    ├── data-ingestion-guide.md        ← Data flow documentation
-    └── continuous-learning.md         ← AI learning patterns
+    ├── data-ingestion-guide.md
+    └── continuous-learning.md
 ```
-
----
-
-## AWS Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         DATA SOURCES                                     │
-│  CloudWatch Alarms │ X-Ray Traces │ CloudTrail │ AWS Config             │
-└──────────────────────────┬──────────────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  Amazon EventBridge — routes alarm events to Detection Lambda            │
-└──────────────────────────┬──────────────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  Detection Lambda — stores event in DynamoDB, starts Step Functions      │
-└──────────────────────────┬──────────────────────────────────────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  AWS Step Functions — 10-Step Incident Investigation Workflow            │
-│                                                                         │
-│  1. Correlate → 2. Score → 3. RCA → 4. Remediation → 5. Approval       │
-│  → 6. Execute (SSM) → 7. Jira Ticket → 8. SNS Notify → 9. Postmortem  │
-│  → 10. Done                                                             │
-└──────────────────────────┬──────────────────────────────────────────────┘
-                           │
-              ┌────────────┼────────────┬────────────┐
-              ▼            ▼            ▼            ▼
-┌──────────────────┐ ┌──────────┐ ┌──────────┐ ┌─────────────────┐
-│ Amazon Bedrock   │ │ DynamoDB │ │ Bedrock  │ │ Systems Manager  │
-│ Claude 3 Haiku   │ │ (5 tables)│ │ Agent    │ │ (Remediation)   │
-│ - Scoring        │ │ + Open-  │ │ - Search │ │ - Rollback       │
-│ - Root Cause     │ │   Search │ │ - Logs   │ │ - Scale          │
-│ - Remediation    │ │          │ │ - Runbook│ │ - Config         │
-│ - Postmortem     │ │          │ │ - Deploy │ │                  │
-└──────────────────┘ └──────────┘ └──────────┘ └─────────────────┘
-              │            │            │            │
-              └────────────┴────────────┴────────────┘
-                           │
-                           ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│  Output Layer                                                           │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────────┐  │
-│  │ Amazon SNS   │  │ Jira Cloud   │  │ React Dashboard              │  │
-│  │ (Alerts)     │  │ (Tickets)    │  │ (CloudFront + WebSocket)     │  │
-│  └──────────────┘  └──────────────┘  └──────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-### AWS Services Used
-
-| Service | Role |
-|---------|------|
-| Amazon CloudWatch | Metrics, logs, and alarms ingestion |
-| AWS X-Ray | Application tracing (active on all Lambdas + Step Functions) |
-| AWS CloudTrail | API activity and change tracking |
-| AWS Config | Configuration state and drift detection |
-| Amazon EventBridge | Event routing and incident triggers |
-| AWS Lambda | 10+ functions: detection, correlation, scoring, RCA, remediation, ticket, notify, postmortem, dashboard, agent actions |
-| AWS Step Functions | 10-step incident workflow orchestration (X-Ray enabled) |
-| Amazon Bedrock | Claude 3 Haiku — root-cause analysis, scoring, remediation, postmortem |
-| Amazon Bedrock Agents | Autonomous incident investigation with Action Groups (search incidents, logs, runbooks, deployments) |
-| Amazon DynamoDB | 5 tables: events, incidents, runbooks, workflow-state, postmortems |
-| Amazon OpenSearch Serverless | Log search and incident correlation |
-| AWS Systems Manager | Execute approved remediation (rollback, scale, config change) via SSM Documents |
-| Amazon SNS | Multi-channel notifications (email, escalation) |
-| Amazon Cognito | User authentication (user pool + app client) |
-| API Gateway (REST) | Dashboard API (/incidents, /risk, /postmortems, /events, /approve) |
-| API Gateway (WebSocket) | Real-time incident streaming to UI |
-| Amazon S3 | Static UI hosting |
-| Amazon CloudFront | CDN for UI (HTTPS, SPA routing) |
-| Jira Cloud | Ticket creation via REST API v3 with dashboard links |
-
----
-
-## Full Pipeline Flow
-
-```
-CloudWatch Alarm fires
-        │
-        ▼
-┌─────────────────────────┐
-│   Detection Lambda      │  Receives alarm event
-│   (03-detection-stack)  │  Writes to: outageshield-events-dev
-│                         │  Starts Step Functions workflow
-└───────────┬─────────────┘
-            │
-            ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                 STEP FUNCTIONS WORKFLOW                               │
-│                 (06-orchestration-stack)                              │
-│                                                                      │
-│  Step 1: CORRELATE                                                   │
-│  Lambda: outageshield-correlation-dev                                │
-│  → Gathers logs, metrics, traces, deployments, configs               │
-│  → Creates incident record in outageshield-incidents-dev             │
-│                                                                      │
-│  Step 2: SCORE                                                       │
-│  Lambda: outageshield-scoring-dev + Amazon Bedrock                   │
-│  → Evaluates severity, business impact, revenue at risk,             │
-│    affected users, SLA status, service risk score                    │
-│  → Writes: severity_score, business_impact_score, scoring_reasoning  │
-│                                                                      │
-│  Step 3: ROOT CAUSE ANALYSIS                                         │
-│  Lambda: outageshield-root-cause-dev + Amazon Bedrock                │
-│  → Analyzes all context to identify probable root cause              │
-│  → Writes: root_cause, confidence                                    │
-│                                                                      │
-│  Step 4: REMEDIATION RECOMMENDATIONS                                 │
-│  Lambda: outageshield-remediation-dev + Amazon Bedrock               │
-│  → Generates ranked fix options (rollback, scale, config)            │
-│  → Writes: recommendations_raw (JSON with confidence, risk, TTR)     │
-│                                                                      │
-│  Step 5: APPROVAL GATE                                               │
-│  → Checks $.signal.auto_remediation_enabled                          │
-│  → If true: pause for human approval (waitForTaskToken)              │
-│  → If false (default): skip to Step 7                                │
-│                                                                      │
-│  Step 6: EXECUTE REMEDIATION                                         │
-│  Lambda: outageshield-remediation-executor-dev                       │
-│  → Calls AWS Systems Manager (SSM SendCommand)                       │
-│  → Supports: rollback, scaling, configuration changes                │
-│  → SSM Documents: OutageShield-Rollback, OutageShield-ScaleUp        │
-│                                                                      │
-│  Step 7: CREATE TICKET                                               │
-│  Lambda: outageshield-ticket-integrator-dev                          │
-│  → Creates Jira ticket via REST API v3 (ADF format)                  │
-│  → Includes: incident details, root cause, dashboard link            │
-│  → Writes: ticket_id, ticket_url, ticket_content                     │
-│                                                                      │
-│  Step 8: NOTIFY                                                      │
-│  Lambda: outageshield-notification-dev                               │
-│  → Sends SNS alert (escalation for SEV-4+, alert for lower)         │
-│  → Includes: ticket link, root cause, revenue at risk                │
-│  → Writes: notifications JSON                                        │
-│                                                                      │
-│  Step 9: POSTMORTEM                                                  │
-│  Lambda: outageshield-postmortem-dev + Amazon Bedrock                │
-│  → Generates full postmortem: summary, duration, root cause,         │
-│    impact assessment, prevention recommendations                     │
-│  → Writes to: outageshield-postmortems-dev                           │
-│                                                                      │
-│  Step 10: DONE                                                       │
-└─────────────────────────────────────────────────────────────────────┘
-            │
-            ▼
-┌─────────────────────────┐
-│   Dashboard API         │  REST: /incidents, /risk, /postmortems, /events
-│   (09-dashboard-stack)  │  WebSocket: real-time updates
-└───────────┬─────────────┘
-            │
-            ▼
-┌─────────────────────────┐
-│   React UI              │  CloudFront: https://d2k1km1tzlio49.cloudfront.net
-│   (UI/src)              │  Jira: https://corpinfollc.atlassian.net/jira/software/projects/TGSHLD
-└─────────────────────────┘
-```
-
-### Bedrock Agent (Autonomous Investigation)
-
-In addition to the deterministic Step Functions workflow, a **Bedrock Agent** provides autonomous investigation capabilities:
-
-```
-Agent: outageshield-investigator-dev
-Model: Claude 3 Haiku
-Action Groups:
-  /search-incidents  → Query DynamoDB for past incidents on the same service
-  /search-logs       → Query OpenSearch/Events for error patterns
-  /get-runbook       → Look up remediation runbook for the alarm type
-  /check-deployments → Check recent deployments and config changes
-```
-
-The agent decides on its own which tools to call and how many iterations to perform, providing deeper investigation beyond the fixed workflow steps.
-
-### DynamoDB Tables
-
-| Table | Purpose | Written By |
-|-------|---------|-----------|
-| `outageshield-events-dev` | Raw alarm events | Detection Lambda |
-| `outageshield-incidents-dev` | Enriched incidents (scores, root cause, recommendations, tickets, notifications) | Steps 1-8 |
-| `outageshield-workflow-state-dev` | Workflow execution tracking | Step Functions |
-| `outageshield-postmortems-dev` | AI postmortem reports with prevention steps | Postmortem Lambda (Step 9) |
-| `outageshield-runbooks-dev` | Remediation runbook templates | Manual / Config |
-
----
-
-## React Dashboard
-
-Professional dark-theme incident command interface deployed on CloudFront.
-
-| Page | Features |
-|------|----------|
-| **Dashboard** | Stats cards (active incidents, high-risk services, raw events), active incidents table with pagination, business impact overview (Critical/High/Medium/Low bars + donut chart), correlation events |
-| **Incidents** | Full incident list with search, severity pills, status badges, business impact, root cause preview |
-| **Incident Detail** | Root cause + confidence bar, AI recommendations, postmortem link, linked Jira ticket (opens in Jira), SNS notification, business details (revenue, users, SLA), workflow step |
-| **Postmortems** | Master-detail layout, AI-generated reports with root cause, impact, scoring reasoning, prevention recommendations |
-| **Notifications** | Tabs: Jira tickets (with external link to Jira) + SNS alerts, clickable to detail pages |
-| **Ticket Detail** | Full ticket info, Jira link, dashboard link, description, priority, revenue/users/SLA |
-| **Login** | Rackspace × AI Agent branding, Cognito authentication |
-
-Tech stack: Vite + React 18 + TypeScript + Tailwind CSS + Recharts + Lucide Icons
 
 ---
 
 ## Demo
 
-### Quick Start
-
 ```bash
-# 1. Deploy all stacks
-cd stacks && chmod +x deploy.sh && ./deploy.sh dev us-east-1
-
-# 2. Push 100 incidents through the full AI pipeline
+# Push 100 incidents through the full AI pipeline
 python scripts/push-100.py
 
-# 3. Wait 15-20 minutes for Bedrock AI to process all workflows
-
-# 4. View dashboard
-# https://d2k1km1tzlio49.cloudfront.net
+# Wait 15-20 minutes for Bedrock AI to process all workflows
+# Then view: https://d2k1km1tzlio49.cloudfront.net
 # Login: sre-team@shopsphere.com / OutageShield2024!
 ```
 
-### Utility Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `scripts/push-100.py` | Trigger 100 incidents through the pipeline |
-| `scripts/run-demo-60.py` | Clear all tables + trigger 100 incidents |
-| `scripts/delete-jira-tickets.py` | Delete all Jira tickets in TGSHLD project |
-| `scripts/clean-and-push-100.py` | Full reset: stop workflows, clear DB, delete Jira, push 100 |
-| `scripts/delete-all.sh` | Delete all AWS CloudFormation stacks |
-
-### What Happens When You Push
-
+**What happens for each incident:**
 ```
-1. ALARM       → CloudWatch alarm event sent to Detection Lambda
-2. DETECT      → Event stored in DynamoDB, Step Functions workflow starts
-3. CORRELATE   → Gathers context (logs, metrics, deployments, config)
-4. SCORE       → Bedrock AI evaluates severity, business impact, revenue at risk
-5. ROOT CAUSE  → Bedrock AI identifies probable root cause with confidence %
-6. REMEDIATION → Bedrock AI recommends ranked actions (rollback, scale, config)
-7. TICKET      → Jira ticket created with full context + dashboard link
-8. NOTIFY      → SNS alert sent to SRE team with ticket link
-9. POSTMORTEM  → Bedrock AI generates summary + prevention recommendations
-10. DONE       → All data in DynamoDB, visible in dashboard in real-time
+CloudWatch alarm → Detection Lambda → stores event → starts Step Functions
+→ Step 1: Correlate (gather context)
+→ Step 2: Score (Bedrock: severity 4, impact 8, revenue $50K/hr)
+→ Step 3: RCA (Bedrock: "DB connection spike after deployment")
+→ Step 4: Remediation (Bedrock: [{rollback, 85%}, {scale, 70%}])
+→ Step 5: Approval gate (skipped — default path)
+→ Step 6: Execute remediation (SSM — only if approved)
+→ Step 7: Jira ticket created (TGSHLD-XXX with dashboard link)
+→ Step 8: SNS alert sent (escalation for SEV-4+)
+→ Step 9: Postmortem generated (summary + prevention steps)
+→ Step 10: Done — all data in DynamoDB, visible in dashboard
 ```
 
 All data is produced by the AI agent pipeline — **no mock data**.
@@ -344,14 +339,12 @@ All data is produced by the AI agent pipeline — **no mock data**.
 
 - ✅ Ingest CloudWatch metrics, logs, alarms, and operational events
 - ✅ Correlate alerts with deployment events, configuration changes, and incident history
-- ✅ Build root-cause reasoning workflow using Amazon Bedrock
+- ✅ Build root-cause reasoning workflow using Bedrock
 - ✅ Map incidents to runbooks and recommended remediation actions
 - ✅ Create incident severity scoring and business impact estimation
 - ✅ Build dashboard for active incidents, outage risk, and recommended actions
 - ✅ Integrate with Jira for ticket creation and workflow handoff
 - ✅ Generate post-incident summaries and prevention recommendations
-- ✅ Wire remediation execution through AWS Systems Manager
-- ✅ Add Bedrock Agent for autonomous incident investigation
 
 ---
 
@@ -369,8 +362,7 @@ All data is produced by the AI agent pipeline — **no mock data**.
 
 | Feature | Description |
 |---------|-------------|
-| Human-in-the-Loop Approval | Enable `auto_remediation_enabled` to pause workflow for human approval via dashboard |
-| Continuous Learning | Feed resolved incident outcomes back to improve scoring and root cause accuracy |
-| Multi-account Support | Monitor incidents across multiple AWS accounts via Organizations |
-| Slack/PagerDuty Integration | Direct notification channels beyond SNS email |
-| Runbook Automation | Map incidents to SSM Automation documents for guided remediation |
+| Human-in-the-Loop Approval | Enable `auto_remediation_enabled` to pause workflow for human approval |
+| Continuous Learning | Feed resolved outcomes back to improve AI accuracy |
+| Multi-account Support | Monitor across AWS accounts via Organizations |
+| Slack/PagerDuty Integration | Direct notification channels |
