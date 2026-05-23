@@ -219,30 +219,11 @@ Resources:
 
   # ─────────────────────────────────────────────────────────────────────────────
   # OpenSearch Serverless — Data Access Policy
+  # Managed outside CloudFormation (scripts/fix-opensearch-policy.py)
+  # Collection: outageshield-logs-dev
+  # Policy: outageshield-logs-dev-access
+  # Principals: user/mariam + all outageshield Lambda roles
   # ─────────────────────────────────────────────────────────────────────────────
-  OpenSearchDataAccessPolicy:
-    Type: AWS::OpenSearchServerless::AccessPolicy
-    Properties:
-      Name: !Sub outageshield-data-${Environment}
-      Type: data
-      Policy: !Sub |
-        [
-          {
-            "Rules": [
-              {
-                "ResourceType": "collection",
-                "Resource": ["collection/outageshield-${Environment}"],
-                "Permission": ["aoss:CreateCollectionItems", "aoss:UpdateCollectionItems", "aoss:DescribeCollectionItems"]
-              },
-              {
-                "ResourceType": "index",
-                "Resource": ["index/outageshield-${Environment}/*"],
-                "Permission": ["aoss:CreateIndex", "aoss:UpdateIndex", "aoss:DescribeIndex", "aoss:ReadDocument", "aoss:WriteDocument"]
-              }
-            ],
-            "Principal": ["arn:aws:iam::${AWS::AccountId}:root"]
-          }
-        ]
 
   # ─────────────────────────────────────────────────────────────────────────────
   # OpenSearch Serverless — Collection (SEARCH type)
@@ -252,7 +233,6 @@ Resources:
     DependsOn:
       - OpenSearchEncryptionPolicy
       - OpenSearchNetworkPolicy
-      - OpenSearchDataAccessPolicy
     Properties:
       Name: !Sub outageshield-${Environment}
       Type: SEARCH

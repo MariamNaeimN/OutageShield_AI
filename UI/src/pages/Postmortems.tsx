@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { FileText, Clock, AlertTriangle, Shield, Users, RefreshCw, Search, Zap, ExternalLink } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { getPostmortems, type Postmortem } from '../services/api'
 
 export default function Postmortems() {
@@ -9,15 +9,28 @@ export default function Postmortems() {
   const [error, setError] = useState<string | null>(null)
   const [selectedPm, setSelectedPm] = useState<Postmortem | null>(null)
   const [search, setSearch] = useState('')
+  const location = useLocation()
 
   useEffect(() => {
     const fetchData = async () => {
       try {
         const data = await getPostmortems()
-        setPostmortems(data)
-        if (data.length > 0) setSelectedPm(data[0])
+        setPostmortems(data || [])
+        // Check for ?incident= in URL
+        const params = new URLSearchParams(location.search)
+        const incidentId = params.get('incident')
+        if (incidentId && data && data.length > 0) {
+          setSearch(incidentId)
+          const match = data.find(pm => pm.incidentId === incidentId || pm.incidentId?.toLowerCase() === incidentId.toLowerCase())
+          if (match) setSelectedPm(match)
+          else setSelectedPm(data[0])
+        } else if (data && data.length > 0) {
+          setSelectedPm(data[0])
+        }
       } catch (err) {
+        console.error('Postmortems fetch error:', err)
         setError(err instanceof Error ? err.message : 'Failed to load postmortems')
+        setPostmortems([])
       } finally {
         setLoading(false)
       }
@@ -28,11 +41,11 @@ export default function Postmortems() {
   const filtered = postmortems.filter(pm => {
     if (!search) return true
     const q = search.toLowerCase()
-    const title = (pm.title || '').toLowerCase()
-    const service = (pm.service || '').toLowerCase()
-    const incidentId = (pm.incidentId || '').toLowerCase()
-    const rootCause = (pm.rootCause || '').toLowerCase()
-    const impact = (pm.impactSummary || '').toLowerCase()
+    const title = String(pm.title || '').toLowerCase()
+    const service = String(pm.service || '').toLowerCase()
+    const incidentId = String(pm.incidentId || '').toLowerCase()
+    const rootCause = String(pm.rootCause || '').toLowerCase()
+    const impact = String(pm.impactSummary || '').toLowerCase()
     return title.includes(q) ||
       service.includes(q) ||
       incidentId.includes(q) ||
@@ -190,7 +203,7 @@ export default function Postmortems() {
                 )}
 
                 {/* Prevention */}
-                {selectedPm.prevention.length > 0 && (
+                {selectedPm.prevention && Array.isArray(selectedPm.prevention) && selectedPm.prevention.length > 0 && (
                   <div className="mb-5">
                     <div className="flex items-center gap-2 mb-4">
                       <div className="w-7 h-7 rounded-lg bg-green-900/25 flex items-center justify-center">

@@ -95,6 +95,11 @@ Resources:
           STATE_MACHINE_ARN: !Sub arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:outageshield-workflow-${Environment}
           OPENSEARCH_ENDPOINT: !ImportValue
             Fn::Sub: outageshield-storage-${Environment}-OpenSearchEndpoint
+      # NOTE: Lambda code is managed via scripts/update-detection-opensearch.py
+      # The deployed code uses opensearch-py (via Lambda Layer) and writes to:
+      # 1. DynamoDB events table
+      # 2. OpenSearch Serverless (outageshield-logs index)
+      # 3. Starts Step Functions workflow
       Code:
         ZipFile: |
           import json
@@ -102,10 +107,11 @@ Resources:
           import os
           from datetime import datetime, timezone
           import uuid
-          import urllib.request
 
           stepfunctions = boto3.client('stepfunctions')
+          dynamodb = boto3.resource('dynamodb')
           STATE_MACHINE_ARN = os.environ['STATE_MACHINE_ARN']
+          EVENTS_TABLE = os.environ.get('EVENTS_TABLE', 'outageshield-events-dev')
           OPENSEARCH_ENDPOINT = os.environ.get('OPENSEARCH_ENDPOINT', '')
 
           THRESHOLDS = {'latency_ms': 500, 'error_rate_pct': 5, 'cpu_pct': 85}
@@ -126,6 +132,8 @@ Resources:
                   signal = generate_signal(event, 'trace')
 
               if signal:
+                  # Store in DynamoDB events table
+                  store_event(signal, event)
                   # Index into OpenSearch for search and correlation
                   index_to_opensearch(signal, event)
                   # Start the full incident investigation workflow
@@ -170,6 +178,25 @@ Resources:
               if detail.get('state', {}).get('value') == 'ALARM':
                   return 4
               return 3
+
+          def store_event(signal, raw_event):
+              """Store the detection event in DynamoDB events table."""
+              try:
+                  table = dynamodb.Table(EVENTS_TABLE)
+                  detail = raw_event.get('detail', {})
+                  table.put_item(Item={
+                      'event_id': signal['signal_id'],
+                      'service': signal['service'],
+                      'source': raw_event.get('source', 'aws.cloudwatch'),
+                      'detection_type': signal['detection_type'],
+                      'severity': signal['severity_score'],
+                      'alarm_name': detail.get('alarmName', ''),
+                      'reason': detail.get('state', {}).get('reason', ''),
+                      'timestamp': signal['timestamp'],
+                      'raw_event': json.dumps(detail, default=str)[:1000]
+                  })
+              except Exception as e:
+                  print(f"Store event failed (non-blocking): {e}")
 
           def start_workflow(signal):
               try:

@@ -71,6 +71,8 @@ Resources:
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Root Cause Analysis Lambda
+  # Code managed via: scripts/update-rca-lambda-v2.py
+  # Features: bulletproof JSON parsing, clean text root_cause, stores root_causes_raw
   # ─────────────────────────────────────────────────────────────────────────────
   RootCauseLambdaRole:
     Type: AWS::IAM::Role
@@ -204,6 +206,8 @@ Resources:
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Remediation Recommendation Lambda
+  # Code managed via: scripts/update-remediation-lambda2.py
+  # Features: anti-hallucination prompt, source attribution, stores recommendations_raw in DynamoDB
   # ─────────────────────────────────────────────────────────────────────────────
   RemediationLambdaRole:
     Type: AWS::IAM::Role
@@ -283,14 +287,18 @@ Resources:
           def build_remediation_prompt(root_causes, context, agent_investigation):
               prompt = f"""You are a Site Reliability Engineer generating remediation recommendations.
 
-              STRICT RULES:
-              - Only recommend actions that are directly supported by the evidence provided below.
-              - Do NOT invent or assume information not present in the data.
-              - If the evidence is insufficient, recommend "manual_intervention" with a note to investigate further.
-              - Base your confidence scores ONLY on how well the evidence supports each recommendation.
-              - Explain your reasoning for each recommendation citing specific evidence.
+              STRICT RULES — ZERO HALLUCINATION:
+              - You may ONLY recommend actions that are DIRECTLY supported by evidence below.
+              - Do NOT invent, assume, or fabricate any information not explicitly stated in the evidence.
+              - If the evidence is insufficient for a specific recommendation, use category "manual_intervention".
+              - Every recommendation MUST cite its exact source: "RCA" (root cause analysis), "AGENT" (agent investigation), or "RUNBOOK" (runbook match).
+              - If the agent investigation found a runbook, use the runbook steps as your recommendations.
+              - If the agent investigation found past incidents with known fixes, recommend those same fixes.
+              - If the agent investigation found a deployment correlation, recommend rollback.
+              - Do NOT generate generic advice like "monitor logs" or "check metrics" unless the evidence specifically says to.
+              - Confidence score MUST reflect evidence strength: 90+ only if runbook match or 3+ similar past incidents confirm it.
 
-              EVIDENCE FROM ROOT CAUSE ANALYSIS:
+              EVIDENCE SOURCE 1 — ROOT CAUSE ANALYSIS (Step 3):
               {json.dumps(root_causes)}
 
               SERVICE: {context.get('service', 'unknown')}
@@ -298,24 +306,30 @@ Resources:
 
               if agent_investigation:
                   prompt += f"""
-              EVIDENCE FROM BEDROCK AGENT DEEP INVESTIGATION:
-              The following is the result of an autonomous investigation that searched past incidents,
-              logs, runbooks, and deployment history:
+              EVIDENCE SOURCE 2 — BEDROCK AGENT AUTONOMOUS INVESTIGATION (Step 3b):
+              The agent searched: past incidents, OpenSearch logs, runbooks, and deployment history.
+              Results:
               {agent_investigation[:3000]}
+              """
+              else:
+                  prompt += """
+              EVIDENCE SOURCE 2 — AGENT INVESTIGATION: Not available (agent was skipped or failed).
+              Without agent evidence, set max confidence to 60 and recommend manual_intervention as first option.
               """
 
               prompt += """
-              For each recommendation provide a JSON object with:
+              OUTPUT FORMAT — Return a JSON array. Each object MUST have:
               1. "category": one of (rollback, scaling, configuration_change, manual_intervention)
-              2. "description": what to do
-              3. "reasoning": WHY this is recommended based on the evidence above (cite specific findings)
-              4. "effectiveness": score 1-5 based on evidence strength
-              5. "risk": (low, medium, high)
-              6. "estimated_ttr_minutes": estimated time to resolve
-              7. "confidence": percentage (0-100) based on how strongly the evidence supports this action
-              8. "evidence": the specific data point that supports this recommendation
+              2. "description": specific action to take (not vague)
+              3. "reasoning": WHY — cite which evidence source supports this (e.g., "Agent found runbook RB-CONN-POOL with this exact step" or "RCA confidence 90% points to connection pool")
+              4. "source": which evidence this came from — one of ("RCA", "AGENT:runbook", "AGENT:past_incidents", "AGENT:deployment_correlation", "AGENT:log_patterns", "insufficient_evidence")
+              5. "effectiveness": score 1-5 (5 only if runbook or past incident confirms it works)
+              6. "risk": (low, medium, high)
+              7. "estimated_ttr_minutes": integer
+              8. "confidence": 0-100 (90+ requires runbook match or 3+ past incidents; 70-89 requires deployment correlation; below 70 for inference only)
 
-              Return as a JSON array ranked by effectiveness. Maximum 4 recommendations."""
+              Return as a JSON array ranked by effectiveness. Maximum 4 recommendations.
+              If evidence is truly insufficient, return: [{"category": "manual_intervention", "description": "Insufficient evidence for automated recommendation. Escalate to service owner.", "reasoning": "No runbook match, no similar past incidents, no deployment correlation found.", "source": "insufficient_evidence", "effectiveness": 1, "risk": "low", "estimated_ttr_minutes": 30, "confidence": 20}]"""
 
               return prompt
 
@@ -444,6 +458,9 @@ Resources:
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Postmortem Generation Lambda
+  # Code managed via: scripts/update-postmortem-lambda.py
+  # Features: uses all previous steps (RCA, scoring, agent, recommendations) in prompt
+  # Forces root_cause to match Step 3 output
   # ─────────────────────────────────────────────────────────────────────────────
   PostmortemLambda:
     Type: AWS::Lambda::Function

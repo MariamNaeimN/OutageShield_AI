@@ -104,20 +104,85 @@ export default function IncidentDetail() {
           {/* Recommendations */}
           {incident.recommendations && incident.recommendations.length > 0 && (
             <div className="bg-[#161b22] border border-gray-800 rounded-xl p-5">
-              <h3 className="text-sm font-semibold text-white mb-3">Recommendations</h3>
-              <div className="space-y-2">
-                {incident.recommendations.map((rec, i) => (
-                  <div key={i} className="p-3 rounded-lg border border-gray-800 bg-gray-800/30">
-                    <p className="text-sm text-gray-200">{rec.description}</p>
-                    <div className="flex gap-4 mt-1 text-xs text-gray-500">
-                      <span>Confidence: {(rec as any).confidence || rec.effectiveness}%</span>
-                      {(rec as any).evidence && <span className="text-gray-600 truncate max-w-xs">{(rec as any).evidence}</span>}
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-sm font-semibold text-white">Remediation Recommendations</h3>
+                <span className="text-xs text-gray-500">{incident.recommendations.length} actions</span>
+              </div>
+              <div className="space-y-2.5">
+                {incident.recommendations.map((rec, i) => {
+                  const icon = rec.category === 'rollback' ? '↩️' : rec.category === 'scaling' ? '📈' : rec.category === 'configuration_change' ? '⚙️' : '👤'
+                  const borderColor = rec.category === 'rollback' ? 'border-l-blue-500' : rec.category === 'scaling' ? 'border-l-green-500' : rec.category === 'configuration_change' ? 'border-l-amber-500' : 'border-l-gray-500'
+                  const riskColor = rec.risk === 'low' ? 'text-green-400' : rec.risk === 'medium' ? 'text-yellow-400' : 'text-red-400'
+                  return (
+                    <div key={i} className={`rounded-lg bg-[#0d1117] border border-gray-700/30 border-l-[3px] ${borderColor} px-4 py-3`}>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-start gap-2.5 flex-1 min-w-0">
+                          <span className="text-sm mt-0.5 shrink-0">{icon}</span>
+                          <div className="min-w-0">
+                            <p className="text-sm text-gray-200 leading-snug">{rec.description}</p>
+                            {(rec as any).reasoning && (
+                              <p className="text-xs text-gray-500 mt-1.5 leading-relaxed">{(rec as any).reasoning}</p>
+                            )}
+                            {(rec as any).source && (
+                              <span className={`inline-flex items-center gap-1 mt-1.5 px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                                String((rec as any).source).includes('runbook') ? 'bg-purple-500/10 text-purple-400' :
+                                String((rec as any).source).includes('past_incidents') ? 'bg-blue-500/10 text-blue-400' :
+                                String((rec as any).source).includes('deployment') ? 'bg-orange-500/10 text-orange-400' :
+                                String((rec as any).source).includes('RCA') ? 'bg-cyan-500/10 text-cyan-400' :
+                                String((rec as any).source).includes('log') ? 'bg-teal-500/10 text-teal-400' :
+                                'bg-gray-500/10 text-gray-400'
+                              }`}>
+                                <span className="w-1 h-1 rounded-full bg-current" />
+                                {(rec as any).source}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0 text-xs">
+                          <span className={riskColor}>{rec.risk}</span>
+                          <span className="text-gray-600">|</span>
+                          <span className="text-gray-400">{(rec as any).estimated_ttr_minutes || rec.estimatedTTR || '?'}m</span>
+                          <span className="text-gray-600">|</span>
+                          <span className="font-bold text-white">{(rec as any).confidence || rec.effectiveness * 20}%</span>
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             </div>
           )}
+
+          {/* Agent Investigation */}
+          {(() => {
+            const raw = incident as unknown as Record<string, unknown>
+            const investigation = raw.agent_investigation as string | undefined
+            if (!investigation) return null
+            return (
+              <div className="bg-[#161b22] border border-purple-800/30 rounded-xl p-5">
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="w-2 h-2 bg-purple-500 rounded-full animate-pulse" />
+                  <h3 className="text-sm font-semibold text-white">Autonomous Agent Investigation</h3>
+                  <span className="px-2 py-0.5 rounded text-xs font-medium bg-purple-900/30 text-purple-400">Bedrock Agent</span>
+                </div>
+                <div className="text-xs text-gray-300 bg-gray-900/50 rounded-lg p-4 leading-relaxed space-y-2">
+                  {investigation.split('\n').filter(Boolean).map((line, i) => {
+                    const trimmed = line.trim()
+                    if (trimmed.startsWith('Investigation Summary') || trimmed.startsWith('Based on') || trimmed.startsWith('Confidence') || trimmed.startsWith('Recommended Actions')) {
+                      return <p key={i} className="font-semibold text-gray-200 mt-2">{trimmed}</p>
+                    }
+                    if (trimmed.match(/^\d+\./)) {
+                      return <p key={i} className="pl-3 text-gray-300">{trimmed}</p>
+                    }
+                    if (trimmed.startsWith('-')) {
+                      return <p key={i} className="pl-5 text-gray-400">{trimmed}</p>
+                    }
+                    return <p key={i}>{trimmed}</p>
+                  })}
+                </div>
+              </div>
+            )
+          })()}
 
           {/* Postmortem Reference */}
           <div className="bg-[#161b22] border border-gray-800 rounded-xl p-5">
@@ -132,7 +197,7 @@ export default function IncidentDetail() {
                 </div>
               </div>
               <Link
-                to={`/postmortems`}
+                to={`/postmortems?incident=${incident.id}`}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-purple-900/20 border border-purple-800/40 rounded-lg text-xs text-purple-400 hover:bg-purple-900/30 transition-colors"
               >
                 <FileText className="w-3 h-3" />

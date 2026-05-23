@@ -33,6 +33,10 @@ export interface Recommendation {
   effectiveness: number
   risk: 'low' | 'medium' | 'high'
   estimatedTTR: number
+  reasoning?: string
+  source?: string
+  confidence?: number
+  evidence?: string
 }
 
 export interface ServiceRisk {
@@ -124,6 +128,17 @@ export async function getActiveIncidents(): Promise<Incident[]> {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function mapIncident(raw: any): Incident {
+  // Clean root_cause: if it's a JSON array string, extract the first description
+  let rootCause = raw.root_cause || raw.rootCause || ''
+  if (typeof rootCause === 'string' && rootCause.trim().startsWith('[')) {
+    try {
+      const parsed = JSON.parse(rootCause)
+      if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].description) {
+        rootCause = parsed[0].description
+      }
+    } catch { /* keep as-is */ }
+  }
+
   return {
     id: raw.incident_id || raw.id || '',
     service: raw.service || '',
@@ -132,7 +147,7 @@ function mapIncident(raw: any): Incident {
     businessImpact: Number(raw.business_impact_score || raw.businessImpact || 5),
     status: raw.status || 'Detected',
     detectedAt: raw.created_at || raw.detectedAt || new Date().toISOString(),
-    rootCause: raw.root_cause || raw.rootCause,
+    rootCause,
     confidence: raw.confidence ? Number(raw.confidence) : undefined,
     recommendations: parseRecommendations(raw.recommendations_raw || raw.recommendations),
     ticket: raw.ticket_id ? { id: raw.ticket_id, system: raw.ticket_system || 'Jira', status: raw.ticket_status || 'Open' } : undefined,
@@ -143,17 +158,24 @@ function mapIncident(raw: any): Incident {
     revenue_at_risk: raw.revenue_at_risk,
     affected_users: raw.affected_users,
     sla_status: raw.sla_status,
-    ticket_url: raw.ticket_url
-  } as Incident & { notifications?: string; ticket_content?: string; revenue_at_risk?: string; affected_users?: string; sla_status?: string; ticket_url?: string }
+    ticket_url: raw.ticket_url,
+    agent_investigation: raw.agent_investigation
+  } as Incident & { notifications?: string; ticket_content?: string; revenue_at_risk?: string; affected_users?: string; sla_status?: string; ticket_url?: string; agent_investigation?: string }
 }
 
 function parseRecommendations(raw: unknown): Recommendation[] {
   if (!raw) return []
+  let parsed: any[] = []
   if (typeof raw === 'string') {
-    try { return JSON.parse(raw) } catch { return [] }
+    try { parsed = JSON.parse(raw) } catch { return [] }
+  } else if (Array.isArray(raw)) {
+    parsed = raw
+  } else {
+    return []
   }
-  if (Array.isArray(raw)) return raw
-  return []
+  // Filter out RCA entries (they have description+confidence+evidence but no category)
+  // Only return actual recommendations that have a category field
+  return parsed.filter(item => item.category && ['rollback', 'scaling', 'configuration_change', 'manual_intervention'].includes(item.category))
 }
 
 export async function getIncidentById(id: string): Promise<Incident> {
@@ -180,6 +202,7 @@ export async function getServiceRisks(): Promise<ServiceRisk[]> {
 
 export async function getPostmortems(): Promise<Postmortem[]> {
   const data = await fetchJson<{ postmortems: Record<string, unknown>[]; count?: number }>('/postmortems')
+  if (!data.postmortems || !Array.isArray(data.postmortems)) return []
   return data.postmortems.map((raw: Record<string, unknown>) => {
     // Postmortem content might be nested in a 'postmortem' field
     const nested = (typeof raw.postmortem === 'object' && raw.postmortem !== null)
