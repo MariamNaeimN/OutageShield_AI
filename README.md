@@ -225,6 +225,38 @@ The agent uses 4 tools to investigate each incident:
 
 ---
 
+## AI Scoring — Business Impact Estimation
+
+The Scoring Lambda (Step 2) uses Bedrock to **reason step-by-step** about each incident's business impact:
+
+**Mental model the AI follows:**
+1. What does this service do? (payment processing? internal logging?)
+2. How many users interact with it per hour?
+3. What percentage of the company's $500M annual revenue ($57K/hour) flows through it?
+4. What's the blast radius? (gateway down = everything down, logger down = no customer impact)
+
+**Example AI reasoning for `payments-api` with HighLatency alarm:**
+> "payments-api handles all transaction processing. With P99 latency at 850ms (threshold 500ms), checkout completion rates drop ~40%. At $57K/hour baseline and 60% of revenue flowing through payments, estimated impact is $34,200/hour with 1.2M affected users. SLA breached."
+
+| Impact Level | Score | Revenue at Risk | Affected Users | SLA Status |
+|---|---|---|---|---|
+| **Critical** | 8-10 | $30K-$50K/hour | 500K-1.2M | Breached |
+| **High** | 6-7 | $3K-$10K/hour | 50K-200K | At Risk |
+| **Medium** | 4-5 | $500-$3K/hour | 5K-50K | Warning |
+| **Low** | 2-3 | $0-$500/hour | 0-5K | OK |
+| **Internal** | 1-2 | $0 (infrastructure) | 0 | OK |
+
+**Scoring outputs per incident:**
+- `severity_score` (1-5) — operational severity
+- `business_impact_score` (1-10) — business criticality  
+- `affected_users` — estimated user count based on service role
+- `revenue_at_risk` — specific dollar amount with calculation basis (e.g., "$34,200/hour (60% of hourly revenue)")
+- `sla_status` — OK / Warning / At Risk / Breached
+- `service_risk_score` (0-100) — composite risk
+- `scoring_reasoning` — AI explanation of the step-by-step assessment
+
+---
+
 ## Anti-Hallucination Design
 
 The Remediation Lambda enforces strict rules:
@@ -317,6 +349,101 @@ python scripts/test-single-incident.py
 | `outageshield-events-dev` | `event_id` | Detection events (alarms) |
 | `outageshield-postmortems-dev` | `postmortem_id` | AI postmortem reports |
 | `outageshield-runbooks-dev` | `runbook_id` | Remediation procedures (15 items) |
+
+### Incident Record (DynamoDB)
+
+Each incident stores the complete AI analysis chain:
+
+```json
+{
+  "incident_id": "INC-5D200565",
+  "service": "api",
+  "title": "Outage signal on api",
+  "status": "Investigating",
+  "created_at": "2026-05-23T04:35:00Z",
+
+  // Step 2: Scoring
+  "severity_score": 4,
+  "business_impact_score": 8,
+  "affected_users": 1000000,
+  "revenue_at_risk": "Payments revenue",
+  "sla_status": "At Risk",
+  "service_risk_score": 85,
+  "scoring_reasoning": "Customer-facing payment processing service...",
+
+  // Step 3: Root Cause
+  "root_cause": "High API latency due to increased request volume",
+  "confidence": 80,
+  "root_causes_raw": "[{\"description\":\"...\",\"confidence\":80,\"evidence\":\"...\"}]",
+
+  // Step 3b: Agent Investigation
+  "agent_investigation": "Investigation Summary: Found 2 similar past incidents...",
+
+  // Step 4: Recommendations
+  "recommendations_raw": "[{\"category\":\"rollback\",\"source\":\"AGENT:deployment_correlation\",...}]",
+
+  // Step 7: Ticket
+  "ticket_id": "TGSHLD-1474",
+  "ticket_url": "https://corpinfollc.atlassian.net/browse/TGSHLD-1474",
+  "ticket_status": "Open",
+  "ticket_content": "{\"summary\":\"...\",\"description\":\"...\",\"priority\":\"High\"}",
+
+  // Step 8: Notification
+  "notifications": "{\"type\":\"escalation\",\"recipient\":\"sre-team@shopsphere.com\",...}",
+
+  // Step 9: Postmortem
+  "postmortem_generated": true,
+  "workflow_step": "postmortem"
+}
+```
+
+### Event Record (DynamoDB + OpenSearch)
+
+```json
+{
+  "event_id": "INC-5D200565",
+  "service": "api",
+  "source": "aws.cloudwatch",
+  "detection_type": "metric",
+  "severity": "4",
+  "alarm_name": "HighLatency-payments-api",
+  "reason": "Threshold Crossed: P99 latency (850ms) > threshold (500ms)",
+  "timestamp": "2026-05-23T04:35:00Z"
+}
+```
+
+### Postmortem Record
+
+```json
+{
+  "postmortem_id": "PM-a89f504b",
+  "incident_id": "INC-5D200565",
+  "service": "api",
+  "title": "Postmortem: api incident",
+  "root_cause": "High API latency due to increased request volume",
+  "summary": "The api service experienced high latency...",
+  "duration": "2-4 hours",
+  "prevention": "[\"Implement auto-scaling\",\"Load testing\",\"Enhanced monitoring\"]",
+  "impact_summary": "1M users affected, payments revenue at risk",
+  "scoring_reasoning": "Customer-facing payment processing...",
+  "created_at": "2026-05-23T04:35:30Z"
+}
+```
+
+### Runbook Record
+
+```json
+{
+  "runbook_id": "DBConnExhaustion",
+  "incident_type": "database",
+  "title": "Database Connection Pool Exhaustion Recovery",
+  "description": "Steps to recover from connection pool exhaustion",
+  "steps": ["Check current connection count", "Kill idle connections", "Increase pool size", "Restart pods", "Scale read replicas"],
+  "category": "configuration_change",
+  "estimated_ttr": "10 minutes",
+  "severity_threshold": 3
+}
+```
 
 **OpenSearch Serverless:**
 - Collection: `outageshield-logs-dev`

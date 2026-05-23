@@ -2,11 +2,10 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { RefreshCw, MoreHorizontal, CheckCircle } from 'lucide-react'
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts'
-import { getActiveIncidents, getServiceRisks, type Incident, type ServiceRisk } from '../services/api'
+import { getActiveIncidents, type Incident } from '../services/api'
 
 export default function Dashboard() {
   const [incidents, setIncidents] = useState<Incident[]>([])
-  const [serviceRisks, setServiceRisks] = useState<ServiceRisk[]>([])
   const [loading, setLoading] = useState(true)
   const [page, setPage] = useState(0)
   const [eventsCount, setEventsCount] = useState(0)
@@ -20,10 +19,6 @@ export default function Dashboard() {
     } catch {
       setIncidents([])
     }
-    try {
-      const riskData = await getServiceRisks()
-      setServiceRisks(riskData)
-    } catch { /* risk endpoint may fail */ }
     // Fetch events count and data for risk overview
     try {
       const eventsResp = await fetch((import.meta.env.VITE_API_URL || '/dev') + '/events')
@@ -172,47 +167,63 @@ export default function Dashboard() {
           {incidents.length === 0 ? (
             <p className="text-sm text-gray-500 text-center py-4">No data</p>
           ) : (
-            <div className="flex gap-8">
-              <div className="flex-1 space-y-3">
-                {(() => {
-                  const critical = incidents.filter(i => i.businessImpact >= 8).length
-                  const high = incidents.filter(i => i.businessImpact >= 6 && i.businessImpact < 8).length
-                  const medium = incidents.filter(i => i.businessImpact >= 4 && i.businessImpact < 6).length
-                  const low = incidents.filter(i => i.businessImpact < 4).length
-                  const max = Math.max(critical, high, medium, low, 1)
+            (() => {
+              const active = incidents.filter(i => i.status !== 'Resolved')
+              const critical = active.filter(i => i.businessImpact >= 8).length
+              const high = active.filter(i => i.businessImpact >= 6 && i.businessImpact < 8).length
+              const medium = active.filter(i => i.businessImpact >= 4 && i.businessImpact < 6).length
+              const low = active.filter(i => i.businessImpact >= 2 && i.businessImpact < 4).length
+              const internal = active.filter(i => i.businessImpact < 2).length
+              const total = active.length
 
-                  const categories = [
-                    { label: 'Critical', count: critical, barClass: 'bg-red-500', textClass: 'text-red-400' },
-                    { label: 'High', count: high, barClass: 'bg-orange-500', textClass: 'text-orange-400' },
-                    { label: 'Medium', count: medium, barClass: 'bg-yellow-500', textClass: 'text-yellow-400' },
-                    { label: 'Low', count: low, barClass: 'bg-green-500', textClass: 'text-green-400' }
-                  ]
+              const chartData = [
+                { name: 'Critical', value: critical, color: '#ef4444' },
+                { name: 'High', value: high, color: '#f97316' },
+                { name: 'Medium', value: medium, color: '#eab308' },
+                { name: 'Low', value: low, color: '#22c55e' },
+                { name: 'Internal', value: internal, color: '#6b7280' }
+              ].filter(d => d.value > 0)
 
-                  return categories.map(cat => (
-                    <div key={cat.label} className="flex items-center gap-3">
-                      <span className={`text-sm font-medium w-20 ${cat.textClass}`}>{cat.label}</span>
-                      <div className="flex-1 h-5 bg-gray-800 rounded-full overflow-hidden">
-                        <div className={`h-full rounded-full ${cat.barClass}`} style={{ width: `${cat.count > 0 ? Math.max(5, (cat.count / max) * 100) : 0}%` }} />
-                      </div>
-                      <span className="text-sm font-bold text-white w-8 text-right">{cat.count}</span>
+              return (
+                <div className="flex items-center gap-8">
+                  {/* Donut Chart */}
+                  <div className="w-44 h-44 relative shrink-0">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie data={chartData} cx="50%" cy="50%" innerRadius={50} outerRadius={72} dataKey="value" stroke="none" animationDuration={800}>
+                          {chartData.map((entry, i) => (<Cell key={i} fill={entry.color} />))}
+                        </Pie>
+                      </PieChart>
+                    </ResponsiveContainer>
+                    <div className="absolute inset-0 flex flex-col items-center justify-center">
+                      <span className="text-3xl font-bold text-white">{total}</span>
+                      <span className="text-[10px] text-gray-500 uppercase tracking-wider">Active</span>
                     </div>
-                  ))
-                })()}
-              </div>
-              <div className="w-40 h-40 relative">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie data={donutData(serviceRisks.length > 0 ? serviceRisks : buildRisksFromIncidents(incidents))} cx="50%" cy="50%" innerRadius={45} outerRadius={65} dataKey="value" stroke="none">
-                      {donutData(serviceRisks.length > 0 ? serviceRisks : buildRisksFromIncidents(incidents)).map((entry, i) => (<Cell key={i} fill={entry.color} />))}
-                    </Pie>
-                  </PieChart>
-                </ResponsiveContainer>
-                <div className="absolute inset-0 flex flex-col items-center justify-center">
-                  <span className="text-2xl font-bold text-white">{incidents.length}</span>
-                  <span className="text-xs text-gray-400">Total</span>
+                  </div>
+
+                  {/* Legend + Bars */}
+                  <div className="flex-1 space-y-3">
+                    {[
+                      { label: 'Critical', count: critical, color: 'bg-red-500', text: 'text-red-400', pct: total ? Math.round((critical/total)*100) : 0 },
+                      { label: 'High', count: high, color: 'bg-orange-500', text: 'text-orange-400', pct: total ? Math.round((high/total)*100) : 0 },
+                      { label: 'Medium', count: medium, color: 'bg-yellow-500', text: 'text-yellow-400', pct: total ? Math.round((medium/total)*100) : 0 },
+                      { label: 'Low', count: low, color: 'bg-green-500', text: 'text-green-400', pct: total ? Math.round((low/total)*100) : 0 },
+                      { label: 'Internal', count: internal, color: 'bg-gray-500', text: 'text-gray-400', pct: total ? Math.round((internal/total)*100) : 0 }
+                    ].map(cat => (
+                      <div key={cat.label} className="flex items-center gap-3">
+                        <div className={`w-2.5 h-2.5 rounded-full ${cat.color} shrink-0`} />
+                        <span className="text-sm text-gray-300 w-16">{cat.label}</span>
+                        <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
+                          <div className={`h-full rounded-full ${cat.color} transition-all duration-700`} style={{ width: `${cat.pct}%` }} />
+                        </div>
+                        <span className={`text-sm font-bold w-8 text-right ${cat.text}`}>{cat.count}</span>
+                        <span className="text-xs text-gray-600 w-10 text-right">{cat.pct}%</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-              </div>
-            </div>
+              )
+            })()
           )}
         </div>
       </div>
@@ -275,12 +286,12 @@ function StatCard({ label, value, color }: { label: string; value: number | stri
 function SeverityPill({ severity }: { severity: number }) {
   const config: Record<number, { label: string; classes: string }> = {
     5: { label: 'CRITICAL', classes: 'bg-red-900/50 text-red-300 border-red-700/50' },
-    4: { label: 'CRITICAL', classes: 'bg-red-900/50 text-red-300 border-red-700/50' },
-    3: { label: 'HIGH', classes: 'bg-orange-900/50 text-orange-300 border-orange-700/50' },
-    2: { label: 'MEDIUM', classes: 'bg-yellow-900/50 text-yellow-300 border-yellow-700/50' },
-    1: { label: 'LOW', classes: 'bg-green-900/50 text-green-300 border-green-700/50' }
+    4: { label: 'HIGH', classes: 'bg-orange-900/50 text-orange-300 border-orange-700/50' },
+    3: { label: 'MEDIUM', classes: 'bg-yellow-900/50 text-yellow-300 border-yellow-700/50' },
+    2: { label: 'LOW', classes: 'bg-green-900/50 text-green-300 border-green-700/50' },
+    1: { label: 'INFO', classes: 'bg-gray-800/50 text-gray-300 border-gray-700/50' }
   }
-  const c = config[severity] || config[2]
+  const c = config[severity] || config[3]
   return <span className={`inline-block px-2.5 py-0.5 rounded text-xs font-bold border ${c.classes}`}>{c.label}</span>
 }
 
@@ -292,9 +303,11 @@ function StatusPill({ status }: { status: string }) {
 }
 
 function ImpactPill({ impact }: { impact: number }) {
-  if (impact >= 7) return <span className="inline-block px-2.5 py-0.5 rounded text-xs font-bold bg-red-900/50 text-red-300 border border-red-700/50">HIGH</span>
-  if (impact >= 4) return <span className="inline-block px-2.5 py-0.5 rounded text-xs font-bold bg-yellow-900/50 text-yellow-300 border border-yellow-700/50">MEDIUM</span>
-  return <span className="inline-block px-2.5 py-0.5 rounded text-xs font-bold bg-green-900/50 text-green-300 border border-green-700/50">LOW</span>
+  if (impact >= 8) return <span className="inline-block px-2.5 py-0.5 rounded text-xs font-bold border bg-red-900/50 text-red-300 border-red-700/50">CRITICAL</span>
+  if (impact >= 6) return <span className="inline-block px-2.5 py-0.5 rounded text-xs font-bold border bg-orange-900/50 text-orange-300 border-orange-700/50">HIGH</span>
+  if (impact >= 4) return <span className="inline-block px-2.5 py-0.5 rounded text-xs font-bold border bg-yellow-900/50 text-yellow-300 border-yellow-700/50">MEDIUM</span>
+  if (impact >= 2) return <span className="inline-block px-2.5 py-0.5 rounded text-xs font-bold border bg-green-900/50 text-green-300 border-green-700/50">LOW</span>
+  return <span className="inline-block px-2.5 py-0.5 rounded text-xs font-bold border bg-gray-800/50 text-gray-400 border-gray-700/50">INTERNAL</span>
 }
 
 function getAge(iso: string) {
@@ -304,34 +317,4 @@ function getAge(iso: string) {
   return `${Math.floor(mins / 60)}h ${mins % 60}m`
 }
 
-function donutData(risks: ServiceRisk[]) {
-  const critical = risks.filter(r => r.risk === 'Critical').length
-  const high = risks.filter(r => r.risk === 'High').length
-  const medium = risks.filter(r => r.risk === 'Medium').length
-  const low = risks.filter(r => r.risk === 'Low').length
-  return [
-    { name: 'Critical', value: critical || 0, color: '#dc2626' },
-    { name: 'High', value: high || 0, color: '#ea580c' },
-    { name: 'Medium', value: medium || 0, color: '#d97706' },
-    { name: 'Low', value: low || 0, color: '#16a34a' }
-  ].filter(d => d.value > 0)
-}
 
-// No mock data — all data comes from the real API pipeline
-
-function buildRisksFromIncidents(incidents: Incident[]): ServiceRisk[] {
-  const svcMap = new Map<string, { count: number; maxSev: number }>()
-  incidents.forEach(inc => {
-    const existing = svcMap.get(inc.service) || { count: 0, maxSev: 0 }
-    existing.count++
-    if (inc.severity > existing.maxSev) existing.maxSev = inc.severity
-    svcMap.set(inc.service, existing)
-  })
-  return Array.from(svcMap.entries()).map(([service, data]) => ({
-    service,
-    risk: (data.maxSev >= 4 ? 'Critical' : data.maxSev >= 3 ? 'High' : data.maxSev >= 2 ? 'Medium' : 'Low') as 'Critical' | 'High' | 'Medium' | 'Low',
-    activeSignals: data.count,
-    lastIncident: '',
-    lastCalculated: ''
-  }))
-}
