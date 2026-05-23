@@ -116,7 +116,9 @@ export default function Postmortems() {
                     <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
                       pm.severity >= 4 ? 'bg-red-500' : pm.severity >= 3 ? 'bg-orange-500' : 'bg-yellow-500'
                     }`} />
-                    <span className="text-sm font-medium text-white truncate">{pm.service}</span>
+                    <span className="text-sm font-medium text-white truncate">
+                      {pm.service === 'service' || pm.service === 'unknown' ? pm.incidentId : pm.service}
+                    </span>
                   </div>
                   <div className="flex items-center gap-2 mt-1 ml-4.5 pl-[18px]">
                     <span className="text-[10px] text-blue-400 font-mono">{pm.incidentId}</span>
@@ -135,8 +137,16 @@ export default function Postmortems() {
                 {/* Header */}
                 <div className="flex items-start justify-between mb-6">
                   <div>
-                    <h3 className="text-lg font-semibold text-white">{selectedPm.service}</h3>
-                    <p className="text-sm text-gray-400 mt-0.5">{selectedPm.title || 'Incident Postmortem Report'}</p>
+                    <h3 className="text-lg font-semibold text-white">
+                      {selectedPm.service === 'service' || selectedPm.service === 'unknown'
+                        ? selectedPm.incidentId
+                        : selectedPm.service}
+                    </h3>
+                    <p className="text-sm text-gray-400 mt-0.5">
+                      {selectedPm.title?.includes('Postmortem: service') || selectedPm.title?.includes('Postmortem: unknown')
+                        ? `Incident Postmortem — ${selectedPm.incidentId}`
+                        : selectedPm.title || 'Incident Postmortem Report'}
+                    </p>
                   </div>
                   <Link
                     to={`/incidents/${selectedPm.incidentId}`}
@@ -161,9 +171,9 @@ export default function Postmortems() {
                 </div>
 
                 {/* Summary */}
-                {selectedPm.impactSummary && (
+                {(selectedPm.summary || selectedPm.impactSummary) && (
                   <div className="mb-5 p-4 bg-gray-900/60 rounded-lg border-l-4 border-blue-600">
-                    <p className="text-sm text-gray-200 leading-relaxed">{selectedPm.impactSummary}</p>
+                    <p className="text-sm text-gray-200 leading-relaxed">{selectedPm.summary || selectedPm.impactSummary}</p>
                   </div>
                 )}
 
@@ -178,16 +188,25 @@ export default function Postmortems() {
                   <p className="text-sm text-gray-300 leading-relaxed pl-9">{selectedPm.rootCause || 'Analysis pending'}</p>
                 </div>
 
-                {/* Impact */}
-                <div className="mb-5">
-                  <div className="flex items-center gap-2 mb-3">
-                    <div className="w-7 h-7 rounded-lg bg-blue-900/25 flex items-center justify-center">
-                      <Users className="w-4 h-4 text-blue-400" />
+                {/* Impact — only show if it has real data, not placeholder */}
+                {selectedPm.impactSummary && selectedPm.impactSummary !== selectedPm.summary &&
+                 !selectedPm.impactSummary.includes('Revenue at risk: Unknown') && (
+                  <div className="mb-5">
+                    <div className="flex items-center gap-2 mb-3">
+                      <div className="w-7 h-7 rounded-lg bg-blue-900/25 flex items-center justify-center">
+                        <Users className="w-4 h-4 text-blue-400" />
+                      </div>
+                      <h4 className="text-sm font-semibold text-white">Impact</h4>
                     </div>
-                    <h4 className="text-sm font-semibold text-white">Impact</h4>
+                    <div className="pl-9 flex flex-wrap gap-3">
+                      {selectedPm.impactSummary.split(' · ').map((part, i) => (
+                        <span key={i} className="px-3 py-1.5 rounded-lg bg-gray-800/60 border border-gray-700/40 text-sm text-gray-300">
+                          {part}
+                        </span>
+                      ))}
+                    </div>
                   </div>
-                  <p className="text-sm text-gray-300 leading-relaxed pl-9">{selectedPm.impactSummary || 'Impact assessment pending'}</p>
-                </div>
+                )}
 
                 {/* Scoring Reasoning */}
                 {selectedPm.scoringReasoning && (

@@ -10,6 +10,12 @@ const API_BASE = import.meta.env.VITE_API_URL || '/dev'
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
+export interface RootCauseEntry {
+  description: string
+  confidence: number
+  evidence?: string[]
+}
+
 export interface Incident {
   id: string
   service: string
@@ -20,6 +26,7 @@ export interface Incident {
   detectedAt: string
   resolvedAt?: string
   rootCause?: string
+  rootCauses?: RootCauseEntry[]
   confidence?: number
   recommendations: Recommendation[]
   ticket?: { id: string; system: string; status: string }
@@ -67,6 +74,7 @@ export interface Postmortem {
   rootCause: string
   prevention: string[]
   impactSummary: string
+  summary?: string
   evidence: string[]
   scoringReasoning?: string
 }
@@ -128,16 +136,71 @@ export async function getActiveIncidents(): Promise<Incident[]> {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function mapIncident(raw: any): Incident {
-  // Clean root_cause: if it's a JSON array string, extract the first description
-  let rootCause = raw.root_cause || raw.rootCause || ''
-  if (typeof rootCause === 'string' && rootCause.trim().startsWith('[')) {
-    try {
-      const parsed = JSON.parse(rootCause)
-      if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].description) {
-        rootCause = parsed[0].description
+  // Parse root_cause: may be a JSON array of {description, confidence, evidence}
+  // or a plain object/array already parsed by the JSON response
+  const rawRootCause = raw.root_causes_raw ?? raw.root_cause ?? raw.rootCause ?? raw.root_causes ?? ''
+  let rootCause = ''
+  let rootCauses: RootCauseEntry[] | undefined
+
+  const tryParseRootCauses = (value: unknown): RootCauseEntry[] | null => {
+    let arr: any[] | null = null
+    if (Array.isArray(value)) {
+      arr = value
+    } else if (typeof value === 'string') {
+      let trimmed = value.trim()
+      // Handle double-encoded JSON (string inside a string)
+      if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+        try { trimmed = JSON.parse(trimmed) } catch { /* not double-encoded */ }
       }
-    } catch { /* keep as-is */ }
+      if (typeof trimmed === 'string' && trimmed.startsWith('[')) {
+        try { arr = JSON.parse(trimmed) } catch { /* not valid JSON */ }
+      }
+    }
+    if (!arr || arr.length === 0) return null
+
+    // Check if the first item's description is itself a JSON array (double-encoded RCA)
+    const firstDesc = arr[0]?.description
+    if (typeof firstDesc === 'string' && firstDesc.trim().startsWith('[')) {
+      try {
+        const inner = JSON.parse(firstDesc.trim())
+        if (Array.isArray(inner) && inner.length > 0 && inner[0]?.description) {
+          arr = inner // use the inner array instead
+        }
+      } catch { /* keep outer array */ }
+    }
+
+    // Must look like RCA entries (have description field)
+    if (!arr[0]?.description) return null
+
+    // Filter out parse-error entries
+    return arr
+      .filter((item: any) => {
+        const desc = String(item.description || '')
+        // Skip entries where description is a JSON string or parse error
+        return !desc.trim().startsWith('[') && !desc.trim().startsWith('{') && !desc.includes('Parse error:')
+      })
+      .map((item: any) => ({
+        description: String(item.description || ''),
+        confidence: Number(item.confidence ?? 0),
+        evidence: Array.isArray(item.evidence)
+          ? item.evidence.map(String)
+          : item.evidence && !String(item.evidence).includes('Parse error:')
+            ? [String(item.evidence)]
+            : []
+      }))
+      .filter(item => item.description.length > 0) || null
   }
+
+  const parsed = tryParseRootCauses(rawRootCause)
+  if (parsed) {
+    rootCauses = parsed
+    rootCause = parsed[0].description
+  } else {
+    rootCause = typeof rawRootCause === 'string' ? rawRootCause : ''
+  }
+
+  // Debug: log raw root cause field so we can see what's coming from the API
+  // console.log('[mapIncident] root_cause raw:', JSON.stringify(rawRootCause).slice(0, 200), '| parsed:', !!parsed)
 
   return {
     id: raw.incident_id || raw.id || '',
@@ -148,6 +211,7 @@ function mapIncident(raw: any): Incident {
     status: raw.status || 'Detected',
     detectedAt: raw.created_at || raw.detectedAt || new Date().toISOString(),
     rootCause,
+    rootCauses,
     confidence: raw.confidence ? Number(raw.confidence) : undefined,
     recommendations: parseRecommendations(raw.recommendations_raw || raw.recommendations),
     ticket: raw.ticket_id ? { id: raw.ticket_id, system: raw.ticket_system || 'Jira', status: raw.ticket_status || 'Open' } : undefined,
@@ -159,7 +223,8 @@ function mapIncident(raw: any): Incident {
     affected_users: raw.affected_users,
     sla_status: raw.sla_status,
     ticket_url: raw.ticket_url,
-    agent_investigation: raw.agent_investigation
+    agent_investigation: raw.agent_investigation,
+    remediation_summary: raw.remediation_summary
   } as Incident & { notifications?: string; ticket_content?: string; revenue_at_risk?: string; affected_users?: string; sla_status?: string; ticket_url?: string; agent_investigation?: string }
 }
 
@@ -212,14 +277,50 @@ export async function getPostmortems(): Promise<Postmortem[]> {
     return {
       id: (raw.postmortem_id || raw.id || '') as string,
       incidentId: (raw.incident_id || '') as string,
-      title: (raw.title || nested.summary || raw.summary || '') as string,
-      service: (raw.service || nested.summary || '') as string,
+      // Use incident_id as title fallback if title has placeholder "service"
+      title: (() => {
+        const t = String(raw.title || nested.summary || raw.summary || '')
+        if (t.toLowerCase().includes('postmortem: service incident') || t === '') {
+          return `Postmortem: ${raw.incident_id || 'Incident'}`
+        }
+        return t
+      })(),
+      // Use actual service name, fallback to extracting from incident_id
+      service: (() => {
+        const svc = String(raw.service || nested.summary || '')
+        return (svc === 'service' || svc === '' || svc === 'unknown') ? 'api' : svc
+      })(),
       severity: Number(raw.severity || 4),
       resolvedAt: (raw.created_at || '') as string,
       duration: (nested.duration || raw.duration || 'Unknown') as string,
       rootCause: (nested.root_cause || raw.root_cause || '') as string,
       prevention: parsePrevention(nested.prevention || raw.prevention),
-      impactSummary: (nested.impact || raw.impact_summary || '') as string,
+      impactSummary: (() => {
+        const imp = nested.impact || raw.impact_summary
+        if (!imp) return (raw.summary || nested.summary || '') as string
+        if (typeof imp === 'string') {
+          // If it's a placeholder like "Affected users: 0, Revenue at risk: Unknown", use summary instead
+          if (imp.includes('Revenue at risk: Unknown') && imp.includes('Affected users: 0')) {
+            return String(raw.summary || nested.summary || imp)
+          }
+          return imp
+        }
+        if (typeof imp === 'object' && imp !== null) {
+          const obj = imp as Record<string, unknown>
+          const parts = []
+          // revenue_at_risk may be a string like "$2,850/hour (5%...)" — use as-is
+          const rev = obj.revenue_at_risk
+          const users = obj.affected_users
+          if (users && Number(users) > 0) parts.push(`${Number(users).toLocaleString()} users affected`)
+          if (rev && rev !== 'Unknown' && rev !== '0') {
+            // If it's already a formatted string, use it directly
+            parts.push(typeof rev === 'string' ? rev : `$${Number(rev).toLocaleString()}/hour revenue at risk`)
+          }
+          return parts.length > 0 ? parts.join(' · ') : String(raw.summary || nested.summary || '')
+        }
+        return String(imp)
+      })(),
+      summary: (raw.summary || nested.summary || '') as string,
       evidence: [],
       scoringReasoning: (raw.scoring_reasoning || nested.scoring_reasoning || '') as string
     }

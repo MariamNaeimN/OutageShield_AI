@@ -1,19 +1,23 @@
 import { useState, useEffect } from 'react'
-import { useParams, Link, useLocation } from 'react-router-dom'
-import { ArrowLeft, RefreshCw, ExternalLink, FileText } from 'lucide-react'
-import { getActiveIncidents, type Incident } from '../services/api'
+import { useParams, Link, useLocation, useNavigate } from 'react-router-dom'
+import { ArrowLeft, ExternalLink, FileText, ChevronRight, Home, Zap } from 'lucide-react'
+import { getActiveIncidents, type Incident, type RootCauseEntry } from '../services/api'
 
 const JIRA_BASE_URL = 'https://corpinfollc.atlassian.net'
 
 export default function IncidentDetail() {
   const { id } = useParams()
   const location = useLocation()
+  const navigate = useNavigate()
   const [incident, setIncident] = useState<Incident | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!id) return
+    setIncident(null)
+    setLoading(true)
+    setError(null)
     const fetchData = async () => {
       try {
         const allIncidents = await getActiveIncidents()
@@ -43,8 +47,14 @@ export default function IncidentDetail() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <RefreshCw className="w-6 h-6 text-brand-500 animate-spin" />
+      <div className="flex flex-col items-center justify-center h-64 gap-4">
+        <div className="relative">
+          <div className="w-12 h-12 rounded-full border-2 border-brand-500/20 border-t-brand-500 animate-spin" />
+          <div className="absolute inset-0 flex items-center justify-center">
+            <Zap className="w-4 h-4 text-brand-400" />
+          </div>
+        </div>
+        <p className="text-sm text-gray-500 animate-pulse">Loading incident data...</p>
       </div>
     )
   }
@@ -52,9 +62,13 @@ export default function IncidentDetail() {
   if (error || !incident) {
     return (
       <div className="space-y-4">
-        <Link to="/" className="inline-flex items-center gap-2 text-sm text-gray-400 hover:text-gray-200">
-          <ArrowLeft className="w-4 h-4" /> Back to Dashboard
-        </Link>
+        <button
+          onClick={() => navigate('/')}
+          className="group inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-800/50 border border-gray-700/50 text-sm text-gray-400 hover:text-white hover:bg-gray-700/50 hover:border-gray-600 transition-all duration-200"
+        >
+          <ArrowLeft className="w-3.5 h-3.5 transition-transform group-hover:-translate-x-0.5" />
+          Back to Dashboard
+        </button>
         <div className="bg-red-950/50 border border-red-800 rounded-lg p-4 text-red-300">
           {error || 'Incident not found'}
         </div>
@@ -64,21 +78,85 @@ export default function IncidentDetail() {
 
   return (
     <div className="space-y-6">
-      <Link to="/" className="inline-flex items-center gap-2 text-sm text-gray-400 hover:text-gray-200">
-        <ArrowLeft className="w-4 h-4" /> Back to Dashboard
-      </Link>
+      {/* Navigation breadcrumb + back button */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => navigate('/')}
+            className="group flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-800/60 border border-gray-700/50 text-sm text-gray-400 hover:text-white hover:bg-gray-700/60 hover:border-gray-500/60 transition-all duration-200 backdrop-blur-sm"
+          >
+            <ArrowLeft className="w-3.5 h-3.5 transition-transform duration-200 group-hover:-translate-x-0.5" />
+            <span className="font-medium">Back</span>
+          </button>
 
-      {/* Header */}
-      <div>
-        <h2 className="text-xl font-bold text-white">{incident.title}</h2>
-        <div className="flex items-center gap-3 mt-2">
-          <span className="px-2.5 py-0.5 rounded text-xs font-bold bg-red-900/50 text-red-300 border border-red-700/50">
-            SEV-{incident.severity}
-          </span>
-          <span className="px-2.5 py-0.5 rounded text-xs font-medium bg-purple-900/30 text-purple-300 border border-purple-700/50">
-            {incident.status}
-          </span>
-          <span className="text-sm text-gray-500">{incident.service}</span>
+          {/* Breadcrumb */}
+          <div className="hidden sm:flex items-center gap-1.5 text-xs text-gray-600">
+            <Link to="/" className="flex items-center gap-1 hover:text-gray-400 transition-colors">
+              <Home className="w-3 h-3" />
+              <span>Dashboard</span>
+            </Link>
+            <ChevronRight className="w-3 h-3" />
+            <span className="text-gray-500">Incidents</span>
+            <ChevronRight className="w-3 h-3" />
+            <span className="text-gray-400 font-medium">{incident.id}</span>
+          </div>
+        </div>
+
+        {/* Live indicator */}
+        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-gray-800/40 border border-gray-700/30 text-xs text-gray-500">
+          <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+          Live data
+        </div>
+      </div>
+
+      {/* Header card */}
+      <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-[#161b22] via-[#161b22] to-[#0d1117] border border-gray-800/80 p-6">
+        {/* Decorative glow */}
+        <div className="absolute top-0 right-0 w-64 h-64 bg-brand-600/5 rounded-full blur-3xl pointer-events-none" />
+        <div className="absolute bottom-0 left-0 w-48 h-48 bg-purple-600/5 rounded-full blur-3xl pointer-events-none" />
+
+        <div className="relative">
+          {/* Top row: severity + status + service */}
+          <div className="flex items-center gap-2.5 mb-3 flex-wrap">
+            <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold border ${
+              incident.severity >= 4 ? 'bg-red-900/40 text-red-300 border-red-700/50' :
+              incident.severity === 3 ? 'bg-orange-900/40 text-orange-300 border-orange-700/50' :
+              'bg-yellow-900/40 text-yellow-300 border-yellow-700/50'
+            }`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${
+                incident.severity >= 4 ? 'bg-red-400' : incident.severity === 3 ? 'bg-orange-400' : 'bg-yellow-400'
+              } animate-pulse`} />
+              SEV-{incident.severity}
+            </span>
+
+            <span className={`px-2.5 py-1 rounded-lg text-xs font-medium border ${
+              incident.status === 'Resolved' ? 'bg-green-900/30 text-green-300 border-green-700/40' :
+              incident.status === 'Mitigating' ? 'bg-blue-900/30 text-blue-300 border-blue-700/40' :
+              incident.status === 'Investigating' ? 'bg-yellow-900/30 text-yellow-300 border-yellow-700/40' :
+              incident.status === 'Awaiting Approval' ? 'bg-purple-900/30 text-purple-300 border-purple-700/40' :
+              'bg-gray-800/60 text-gray-300 border-gray-700/40'
+            }`}>
+              {incident.status}
+            </span>
+
+            <span className="px-2.5 py-1 rounded-lg text-xs font-medium bg-gray-800/60 text-gray-400 border border-gray-700/40">
+              {incident.service}
+            </span>
+
+            <span className="ml-auto text-xs text-gray-600 font-mono">{incident.id}</span>
+          </div>
+
+          {/* Title */}
+          <h1 className="text-xl font-bold text-white leading-snug tracking-tight">
+            {incident.title}
+          </h1>
+
+          {/* Detected time */}
+          <p className="mt-2 text-xs text-gray-500">
+            Detected {new Date(incident.detectedAt).toLocaleString()}
+            {' · '}
+            <span className="text-gray-400">{incident.workflowStep}</span>
+          </p>
         </div>
       </div>
 
@@ -86,17 +164,79 @@ export default function IncidentDetail() {
         {/* Left: Root Cause + Recommendations */}
         <div className="col-span-2 space-y-4">
           {/* Root Cause */}
-          {incident.rootCause && (
+          {(incident.rootCauses?.length || incident.rootCause) && (
             <div className="bg-[#161b22] border border-gray-800 rounded-xl p-5">
-              <h3 className="text-sm font-semibold text-white mb-2">Root Cause (AI)</h3>
-              <p className="text-sm text-gray-300">{incident.rootCause}</p>
-              {incident.confidence && (
-                <div className="mt-3 flex items-center gap-2">
-                  <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
-                    <div className="h-full bg-brand-500 rounded-full" style={{ width: `${incident.confidence}%` }} />
-                  </div>
-                  <span className="text-xs text-gray-400">{incident.confidence}% confidence</span>
+              <h3 className="text-sm font-semibold text-white mb-3">Root Cause (AI)</h3>
+
+              {incident.rootCauses && incident.rootCauses.length > 0 ? (
+                <div className="space-y-4">
+                  {incident.rootCauses.map((rc: RootCauseEntry, i: number) => {
+                    const confColor =
+                      rc.confidence >= 80 ? 'bg-green-500' :
+                      rc.confidence >= 50 ? 'bg-yellow-500' :
+                      'bg-red-500'
+                    const confLabel =
+                      rc.confidence >= 80 ? 'text-green-400' :
+                      rc.confidence >= 50 ? 'text-yellow-400' :
+                      'text-red-400'
+                    return (
+                      <div key={i} className={`${i > 0 ? 'border-t border-gray-700/50 pt-4' : ''}`}>
+                        {incident.rootCauses!.length > 1 && (
+                          <span className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5 block">
+                            Cause #{i + 1}
+                          </span>
+                        )}
+                        <p className="text-sm text-gray-200 leading-relaxed">{rc.description}</p>
+
+                        {/* Confidence bar */}
+                        <div className="mt-3 flex items-center gap-2">
+                          <div className="flex-1 h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                            <div
+                              className={`h-full ${confColor} rounded-full transition-all duration-500`}
+                              style={{ width: `${rc.confidence}%` }}
+                            />
+                          </div>
+                          <span className={`text-xs font-medium ${confLabel} w-16 text-right`}>
+                            {rc.confidence}% conf.
+                          </span>
+                        </div>
+
+                        {/* Evidence */}
+                        {rc.evidence && rc.evidence.length > 0 && (
+                          <div className="mt-3">
+                            <p className="text-[10px] font-semibold text-gray-500 uppercase tracking-wider mb-1.5">Evidence</p>
+                            <ul className="space-y-1">
+                              {rc.evidence.map((ev, j) => (
+                                <li key={j} className="flex items-start gap-2 text-xs text-gray-400">
+                                  <span className="mt-1 w-1 h-1 rounded-full bg-brand-500 shrink-0" />
+                                  <span className="leading-relaxed">{ev}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
+              ) : (
+                /* Fallback: plain string root cause */
+                <>
+                  <p className="text-sm text-gray-300">
+                    {/* If it still looks like raw JSON, show a placeholder */}
+                    {incident.rootCause?.trim().startsWith('[')
+                      ? 'Root cause analysis pending...'
+                      : incident.rootCause}
+                  </p>
+                  {incident.confidence && (
+                    <div className="mt-3 flex items-center gap-2">
+                      <div className="flex-1 h-2 bg-gray-800 rounded-full overflow-hidden">
+                        <div className="h-full bg-brand-500 rounded-full" style={{ width: `${incident.confidence}%` }} />
+                      </div>
+                      <span className="text-xs text-gray-400">{incident.confidence}% confidence</span>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}
@@ -108,6 +248,23 @@ export default function IncidentDetail() {
                 <h3 className="text-sm font-semibold text-white">Remediation Recommendations</h3>
                 <span className="text-xs text-gray-500">{incident.recommendations.length} actions</span>
               </div>
+              {/* Summary */}
+              {(() => {
+                const raw = incident as unknown as Record<string, unknown>
+                let summary = raw.remediation_summary as string | undefined
+                if (!summary) return null
+                // Strip any "Remediation Summary:" label prefix or suffix the model may have echoed
+                summary = summary.replace(/^Remediation Summary:\s*/i, '').replace(/\s*Remediation Summary:\s*$/i, '').trim()
+                // Strip trailing comma+period artifacts like ", ." or ",."
+                summary = summary.replace(/,\s*\.$/, '.').replace(/,\s*$/, '').trim()
+                if (!summary) return null
+                return (
+                  <div className="mb-4 p-4 bg-blue-950/20 border border-blue-800/30 rounded-lg">
+                    <p className="text-[11px] font-semibold text-blue-400 uppercase tracking-wider mb-1.5">Remediation Summary</p>
+                    <p className="text-sm text-blue-200 leading-relaxed">{summary}</p>
+                  </div>
+                )
+              })()}
               <div className="space-y-2.5">
                 {incident.recommendations.map((rec, i) => {
                   const icon = rec.category === 'rollback' ? '↩️' : rec.category === 'scaling' ? '📈' : rec.category === 'configuration_change' ? '⚙️' : '👤'
@@ -130,10 +287,18 @@ export default function IncidentDetail() {
                                 String((rec as any).source).includes('deployment') ? 'bg-orange-500/10 text-orange-400' :
                                 String((rec as any).source).includes('RCA') ? 'bg-cyan-500/10 text-cyan-400' :
                                 String((rec as any).source).includes('log') ? 'bg-teal-500/10 text-teal-400' :
+                                String((rec as any).source) === 'agent_advice' ? 'bg-gray-500/10 text-gray-400' :
                                 'bg-gray-500/10 text-gray-400'
                               }`}>
                                 <span className="w-1 h-1 rounded-full bg-current" />
-                                {(rec as any).source}
+                                {(() => {
+                                  const src = String((rec as any).source)
+                                  if (src === 'agent_advice') return 'Agent Advice'
+                                  if (src === 'insufficient_evidence') return 'Low Evidence'
+                                  if (src === 'RCA') return 'Root Cause Analysis'
+                                  if (src.startsWith('AGENT:')) return src.replace('AGENT:', 'Agent: ').replace(/_/g, ' ')
+                                  return src.replace(/_/g, ' ')
+                                })()}
                               </span>
                             )}
                           </div>
@@ -158,27 +323,212 @@ export default function IncidentDetail() {
             const raw = incident as unknown as Record<string, unknown>
             const investigation = raw.agent_investigation as string | undefined
             if (!investigation) return null
+
+            // Replace <REDACTED> with meaningful source names
+            const cleanedInvestigation = investigation
+              .replace(/\[Source:\s*<REDACTED>\s*\/OpenSearch\]/gi, '[Source: OpenSearch Logs]')
+              .replace(/\[Source:\s*<REDACTED>\]/gi, '[Source: Agent Tool]')
+              .replace(/<REDACTED>\/OpenSearch/gi, 'OpenSearch Logs')
+              .replace(/<REDACTED>/gi, 'Agent Tool')
+              // Strip Remediation Summary and everything after (anywhere in text)
+              .replace(/\s*Remediation Summary[\s\S]*$/i, '')
+              .replace(/\s*recommended_actions:[\s\S]*$/i, '')
+              // Strip agent meta-text like "This concludes the investigation..."
+              .replace(/This concludes the investigation[\s\S]*$/i, '')
+              .replace(/I have (?:now )?(?:completed|provided|finished)[\s\S]*$/i, '')
+              // Strip "No data found from" orphan text (source tag was stripped leaving the prefix)
+              .replace(/No data found from\s*\.?/gi, '')
+              // Map XML-style section tags to [Source: X] equivalents
+              .replace(/<investigation_summary>/gi, '')
+              .replace(/<\/investigation_summary>/gi, '')
+              .replace(/<similar_incidents>/gi,    '\n[Source: Incident History DB]\n')
+              .replace(/<\/similar_incidents>/gi,  '')
+              .replace(/<log_findings>/gi,         '\n[Source: OpenSearch Logs]\n')
+              .replace(/<\/log_findings>/gi,       '')
+              .replace(/<deployment_correlation>/gi, '\n[Source: Deployment History]\n')
+              .replace(/<\/deployment_correlation>/gi, '')
+              .replace(/<runbook_findings>/gi,     '\n[Source: Runbook DB]\n')
+              .replace(/<\/runbook_findings>/gi,   '')
+              .replace(/<recommended_actions>[\s\S]*?<\/recommended_actions>/gi, '')
+              .replace(/<\/?[a-z_]+>/gi, '')
+              // Map plain-text snake_case section labels
+              .replace(/^Similar_incidents:\s*$/gim,       '[Source: Incident History DB]')
+              .replace(/^Log_findings:\s*$/gim,            '[Source: OpenSearch Logs]')
+              .replace(/^Deployment_correlation:\s*$/gim,  '[Source: Deployment History]')
+              .replace(/^Runbook_findings:\s*$/gim,        '[Source: Runbook DB]')
+              .replace(/^Similar_incidents:/gim,           '[Source: Incident History DB]')
+              .replace(/^Log_findings:/gim,                '[Source: OpenSearch Logs]')
+              .replace(/^Deployment_correlation:/gim,      '[Source: Deployment History]')
+              .replace(/^Runbook_findings:/gim,            '[Source: Runbook DB]')
+
+            // Parse sections using [Source: X] tags as reliable section boundaries
+            // Build a map of source label → section config
+            const SOURCE_MAP: Record<string, { title: string; icon: string; color: string }> = {
+              'incident history': { title: 'Past Incidents',            icon: '🔍', color: 'border-l-blue-500'   },
+              'opensearch':       { title: 'Log Analysis (OpenSearch)', icon: '📊', color: 'border-l-teal-500'   },
+              'runbook':          { title: 'Runbook',                   icon: '📋', color: 'border-l-purple-500' },
+              'deployment':       { title: 'Deployment Correlation',    icon: '🚀', color: 'border-l-orange-500' },
+              'agent advice':     { title: 'Agent Advice',              icon: '💡', color: 'border-l-yellow-500' },
+            }
+
+            const resolveSource = (tag: string): string => {
+              const lower = tag.toLowerCase()
+              for (const key of Object.keys(SOURCE_MAP)) {
+                if (lower.includes(key)) return key
+              }
+              return 'summary'
+            }
+
+            const sectionMap = new Map<string, { title: string; icon: string; color: string; items: string[] }>()
+            sectionMap.set('summary', { title: 'Summary', icon: '📝', color: 'border-l-gray-500', items: [] })
+            let currentKey = 'summary'
+
+            cleanedInvestigation.split('\n').forEach(line => {
+              const trimmed = line.trim()
+              if (!trimmed) return
+
+              // Detect [Source: X] tag — may be at start OR inline at end of line
+              // First check if the line starts with a [Source:] tag
+              const sourceMatch = trimmed.match(/^\[Source:\s*([^\]]+)\]/i)
+              if (sourceMatch) {
+                const key = resolveSource(sourceMatch[1])
+                currentKey = key
+                if (!sectionMap.has(key)) {
+                  const cfg = SOURCE_MAP[key] ?? { title: sourceMatch[1], icon: '📌', color: 'border-l-gray-500' }
+                  sectionMap.set(key, { ...cfg, items: [] })
+                }
+                const rest = trimmed.replace(/^\[Source:[^\]]+\]\s*/i, '').trim()
+                if (rest && rest.length > 3) sectionMap.get(currentKey)?.items.push(rest)
+                return
+              }
+
+              // Detect inline [Source: X] tag at end of line — e.g. "Similar Incidents: No past incidents found. [Source: Incident History DB]"
+              const inlineSourceMatch = trimmed.match(/\[Source:\s*([^\]]+)\]\s*$/i)
+              if (inlineSourceMatch) {
+                const key = resolveSource(inlineSourceMatch[1])
+                // Switch section for subsequent lines
+                currentKey = key
+                if (!sectionMap.has(key)) {
+                  const cfg = SOURCE_MAP[key] ?? { title: inlineSourceMatch[1], icon: '📌', color: 'border-l-gray-500' }
+                  sectionMap.set(key, { ...cfg, items: [] })
+                }
+                // Add the content before the tag as an item
+                const content = trimmed
+                  .replace(/\[Source:[^\]]*\]\s*$/i, '')
+                  .replace(/^(Similar Incidents?|Log Findings?|Deployment Correlation|Runbook Findings?):\s*/i, '')
+                  .trim()
+                if (content && content.length > 3) sectionMap.get(currentKey)?.items.push(content)
+                return
+              }
+
+              // Skip section-header-only lines
+              if (trimmed.match(/^Investigation Summary:\s*$/i)) return
+              if (trimmed.match(/^Remediation Summary:/i)) return
+
+              // Detect plain-text section label lines (no [Source:] tag)
+              const sectionLabelMatch = trimmed.match(/^(Similar Incidents?|Log Findings?|Deployment Correlation|Runbook Findings?|Past Incidents?):\s*(.*)/i)
+              if (sectionLabelMatch) {
+                const label = sectionLabelMatch[1].toLowerCase()
+                const rest = sectionLabelMatch[2].trim()
+                if (label.includes('similar') || label.includes('past incident')) {
+                  currentKey = 'incident history'
+                  if (!sectionMap.has(currentKey)) sectionMap.set(currentKey, { ...SOURCE_MAP['incident history'], items: [] })
+                } else if (label.includes('log')) {
+                  currentKey = 'opensearch'
+                  if (!sectionMap.has(currentKey)) sectionMap.set(currentKey, { ...SOURCE_MAP['opensearch'], items: [] })
+                } else if (label.includes('deployment')) {
+                  currentKey = 'deployment'
+                  if (!sectionMap.has(currentKey)) sectionMap.set(currentKey, { ...SOURCE_MAP['deployment'], items: [] })
+                } else if (label.includes('runbook')) {
+                  currentKey = 'runbook'
+                  if (!sectionMap.has(currentKey)) sectionMap.set(currentKey, { ...SOURCE_MAP['runbook'], items: [] })
+                }
+                if (rest && rest.length > 3 && !rest.toLowerCase().includes('no past incidents found') && !rest.toLowerCase().includes('no similar')) {
+                  sectionMap.get(currentKey)?.items.push(rest)
+                }
+                return
+              }
+
+              // Detect legacy numbered/keyword section headers (fallback for older format)
+              if (trimmed.match(/similar past incidents/i) && !trimmed.startsWith('-')) {
+                currentKey = 'incident history'
+                if (!sectionMap.has(currentKey)) sectionMap.set(currentKey, { ...SOURCE_MAP['incident history'], items: [] })
+                return
+              }
+              if (trimmed.match(/^log.?findings/i) || (trimmed.match(/log findings|opensearch log/i) && !trimmed.startsWith('-'))) {
+                currentKey = 'opensearch'
+                if (!sectionMap.has(currentKey)) sectionMap.set(currentKey, { ...SOURCE_MAP['opensearch'], items: [] })
+                return
+              }
+              if (trimmed.match(/^runbook.?findings/i) || (trimmed.match(/runbook findings|runbook for/i) && !trimmed.startsWith('-'))) {
+                currentKey = 'runbook'
+                if (!sectionMap.has(currentKey)) sectionMap.set(currentKey, { ...SOURCE_MAP['runbook'], items: [] })
+                return
+              }
+              if (trimmed.match(/^deployment.?correlation/i) || (trimmed.match(/deployment correlation|deployment history/i) && !trimmed.startsWith('-'))) {
+                currentKey = 'deployment'
+                if (!sectionMap.has(currentKey)) sectionMap.set(currentKey, { ...SOURCE_MAP['deployment'], items: [] })
+                return
+              }
+              if (trimmed.match(/^similar.?incidents/i) && !trimmed.startsWith('-')) {
+                currentKey = 'incident history'
+                if (!sectionMap.has(currentKey)) sectionMap.set(currentKey, { ...SOURCE_MAP['incident history'], items: [] })
+                return
+              }
+
+              // Content line — strip leading bullet/number and any inline [Source:] tags
+              const clean = trimmed
+                .replace(/^[-•]\s*/, '')
+                .replace(/^\d+\.\s*/, '')
+                .replace(/\[Source:[^\]]*\]\s*/gi, '')
+                .trim()
+              // Skip noise lines
+              if (!clean || clean.length <= 3) return
+              if (/^no data found/i.test(clean)) return
+              if (/^no similar past incidents/i.test(clean)) return
+              if (/^no information available/i.test(clean)) return
+              if (/^similar past incidents:/i.test(clean) && clean.length < 30) return
+              // Skip lines that are just a source label echoed back (e.g. "Deployment History." "Runbook DB.")
+              if (/^(deployment history|runbook db|incident history db|opensearch logs?)\.?$/i.test(clean)) return
+              sectionMap.get(currentKey)?.items.push(clean)
+            })
+
+            // Remove empty sections, source-label-only sections, and summary if other sections exist
+            const sections = Array.from(sectionMap.values()).filter(s => {
+              if (s.items.length === 0) return false
+              // Filter sections that only contain the source label echoed back
+              if (s.items.length === 1) {
+                const only = s.items[0].toLowerCase()
+                if (/^(deployment history|runbook db|incident history db|opensearch logs?|no data|no similar|no information)/.test(only)) return false
+              }
+              return true
+            })
+            if (sections.length > 1) {
+              const idx = sections.findIndex(s => s.title === 'Summary')
+              if (idx >= 0 && sections[idx].items.length <= 1) sections.splice(idx, 1)
+            }
+
             return (
               <div className="bg-[#161b22] border border-purple-800/30 rounded-xl p-5">
-                <div className="flex items-center gap-2 mb-3">
+                <div className="flex items-center gap-2 mb-4">
                   <div className="w-2 h-2 bg-purple-500 rounded-full animate-pulse" />
                   <h3 className="text-sm font-semibold text-white">Autonomous Agent Investigation</h3>
                   <span className="px-2 py-0.5 rounded text-xs font-medium bg-purple-900/30 text-purple-400">Bedrock Agent</span>
                 </div>
-                <div className="text-xs text-gray-300 bg-gray-900/50 rounded-lg p-4 leading-relaxed space-y-2">
-                  {investigation.split('\n').filter(Boolean).map((line, i) => {
-                    const trimmed = line.trim()
-                    if (trimmed.startsWith('Investigation Summary') || trimmed.startsWith('Based on') || trimmed.startsWith('Confidence') || trimmed.startsWith('Recommended Actions')) {
-                      return <p key={i} className="font-semibold text-gray-200 mt-2">{trimmed}</p>
-                    }
-                    if (trimmed.match(/^\d+\./)) {
-                      return <p key={i} className="pl-3 text-gray-300">{trimmed}</p>
-                    }
-                    if (trimmed.startsWith('-')) {
-                      return <p key={i} className="pl-5 text-gray-400">{trimmed}</p>
-                    }
-                    return <p key={i}>{trimmed}</p>
-                  })}
+                <div className="space-y-3">
+                  {sections.map((section, i) => (
+                    <div key={i} className={`border-l-[3px] ${section.color} bg-gray-900/30 rounded-r-lg px-4 py-3`}>
+                      <div className="flex items-center gap-2 mb-1.5">
+                        <span className="text-sm">{section.icon}</span>
+                        <span className="text-xs font-semibold text-gray-200">{section.title}</span>
+                      </div>
+                      <div className="space-y-1 pl-6">
+                        {section.items.map((item, j) => (
+                          <p key={j} className="text-xs text-gray-400 leading-relaxed">{item}</p>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               </div>
             )

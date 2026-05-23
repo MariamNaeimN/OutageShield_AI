@@ -71,12 +71,26 @@ Resources:
         - Cross-reference with runbooks for known solutions
         - Provide a detailed investigation summary with findings and confidence level
 
+        CRITICAL RULE — SOURCE ATTRIBUTION:
+        For EVERY finding you report, you MUST state which data source provided the information using these EXACT labels:
+        - [Source: Incident History DB] — for past incident findings
+        - [Source: OpenSearch Logs] — for log patterns and alarm data
+        - [Source: Runbook DB] — for runbook steps and procedures
+        - [Source: Deployment History] — for deployment and config change findings
+        - [Source: Agent Advice] — for your own recommendations that are NOT from a data source
+
+        Do NOT use tool names or function names in source labels. Use ONLY the labels above.
+        Do NOT present information without citing its source.
+        If a data source returned empty results, say "No data found from [source label]".
+
         Always provide structured output with:
-        - investigation_summary: What you found
-        - similar_incidents: Past incidents that match
-        - log_findings: Relevant log patterns
-        - deployment_correlation: Whether a recent deployment is likely the cause
-        - recommended_actions: What to do based on your investigation
+        - investigation_summary: What you found (with sources cited)
+        - similar_incidents: Past incidents that match [Source: Incident History DB]
+        - log_findings: Relevant log patterns [Source: OpenSearch Logs]
+        - deployment_correlation: Whether a recent deployment is likely the cause [Source: Deployment History]
+        - runbook_findings: What the runbook says [Source: Runbook DB]
+        - recommended_actions: What to do — mark each as [Source: data_source_label] or [Source: Agent Advice]
+        - remediation_summary: A final paragraph that synthesizes ALL findings into a clear remediation plan. Example: "Based on [X past incidents], [Y OpenSearch alarms], [runbook steps], and [deployment changes], the recommended remediation path is: 1) [immediate action], 2) [short-term fix], 3) [long-term prevention]. Confidence: High/Medium/Low."
       Description: !Sub OutageShield AI Incident Investigator Agent (${Environment})
       ActionGroups:
         - ActionGroupName: IncidentInvestigationTools

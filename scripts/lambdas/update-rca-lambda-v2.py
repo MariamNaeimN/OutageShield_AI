@@ -126,15 +126,35 @@ def parse_root_causes(response_text):
         for cause in causes[:3]:
             if isinstance(cause, dict):
                 desc = cause.get('description', '')
-                # Ensure description is plain text
-                if isinstance(desc, str) and not desc.strip().startswith('[') and not desc.strip().startswith('{'):
+                # If description is itself a JSON array (double-encoded), unwrap it
+                if isinstance(desc, str) and desc.strip().startswith('['):
+                    try:
+                        inner = json.loads(desc.strip())
+                        if isinstance(inner, list) and inner and isinstance(inner[0], dict):
+                            # Use the inner array instead
+                            for inner_cause in inner[:3]:
+                                inner_desc = inner_cause.get('description', '')
+                                if isinstance(inner_desc, str) and not inner_desc.strip().startswith('['):
+                                    cleaned.append({
+                                        'description': inner_desc,
+                                        'confidence': inner_cause.get('confidence', 50),
+                                        'evidence': inner_cause.get('evidence', '')
+                                    })
+                            break
+                    except:
+                        pass
+                    # Still looks like JSON - skip this entry
+                    continue
+                if isinstance(desc, str) and not desc.strip().startswith('{') and 'Parse error' not in desc:
                     cleaned.append(cause)
                 else:
-                    cleaned.append({
-                        'description': extract_clean_description(cause),
-                        'confidence': cause.get('confidence', 50),
-                        'evidence': cause.get('evidence', '')
-                    })
+                    plain = extract_clean_description(cause)
+                    if plain and 'Parse error' not in plain:
+                        cleaned.append({
+                            'description': plain,
+                            'confidence': cause.get('confidence', 50),
+                            'evidence': cause.get('evidence', '')
+                        })
         return cleaned if cleaned else [{'description': response_text[:100], 'confidence': 50, 'evidence': 'Parse fallback'}]
     except Exception as e:
         print(f"Parse error: {e}")

@@ -141,9 +141,11 @@ function StatusPill({ status }: { status: string }) {
 }
 
 function ImpactPill({ impact }: { impact: number }) {
-  if (impact >= 7) return <span className="inline-block px-2.5 py-0.5 rounded text-xs font-bold bg-red-900/50 text-red-300 border border-red-700/50">HIGH</span>
+  if (impact >= 8) return <span className="inline-block px-2.5 py-0.5 rounded text-xs font-bold bg-red-900/50 text-red-300 border border-red-700/50">CRITICAL</span>
+  if (impact >= 6) return <span className="inline-block px-2.5 py-0.5 rounded text-xs font-bold bg-orange-900/50 text-orange-300 border border-orange-700/50">HIGH</span>
   if (impact >= 4) return <span className="inline-block px-2.5 py-0.5 rounded text-xs font-bold bg-yellow-900/50 text-yellow-300 border border-yellow-700/50">MEDIUM</span>
-  return <span className="inline-block px-2.5 py-0.5 rounded text-xs font-bold bg-green-900/50 text-green-300 border border-green-700/50">LOW</span>
+  if (impact >= 2) return <span className="inline-block px-2.5 py-0.5 rounded text-xs font-bold bg-green-900/50 text-green-300 border border-green-700/50">LOW</span>
+  return <span className="inline-block px-2.5 py-0.5 rounded text-xs font-bold bg-gray-800/50 text-gray-400 border border-gray-700/50">INTERNAL</span>
 }
 
 function getAge(iso: string) {
