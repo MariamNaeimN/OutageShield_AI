@@ -82,7 +82,7 @@ def ensure_all_sources(recommendations, agent_investigation, root_causes):
 
     # AGENT:runbook - only if runbook had actual steps
     if 'AGENT:runbook' not in existing_sources:
-        pos = [r'\\[Source:\\s*Runbook', r'runbook.*steps?', r'runbook.*provides?', r'runbook.*contains?', r'runbook.*guidance', r'runbook.*general']
+        pos = [r'\\[Source:\\s*Runbook', r'runbook', r'runbook.*steps?', r'runbook.*provides?', r'runbook.*contains?', r'runbook.*guidance', r'runbook.*general']
         neg = [r'no runbook.*found', r'no runbook entries', r'runbook.*not found', r'no.*runbook.*data']
         if has_positive_evidence(pos, neg):
             # Extract actual runbook content from agent investigation
@@ -106,7 +106,7 @@ def ensure_all_sources(recommendations, agent_investigation, root_causes):
 
     # AGENT:log_patterns - only if OpenSearch returned actual alarm data
     if 'AGENT:log_patterns' not in existing_sources:
-        pos = [r'\\[Source:\\s*OpenSearch', r'alarm.*found', r'alarms.*show', r'log.*show', r'5xx|latency|timeout|error rate|CPU|memory|disk|health check|queue']
+        pos = [r'\\[Source:\\s*OpenSearch', r'OpenSearch', r'alarm.*found', r'alarms.*show', r'log.*show', r'5xx|latency|timeout|error rate|CPU|memory|disk|health check|queue']
         neg = [r'no.*log.*found', r'no.*alarm.*found', r'no.*opensearch.*found', r'no.*log.*patterns.*found']
         if has_positive_evidence(pos, neg):
             # Extract actual OpenSearch findings from agent investigation
@@ -126,7 +126,7 @@ def ensure_all_sources(recommendations, agent_investigation, root_causes):
 
     # AGENT:past_incidents - only if actual past incidents were found
     if 'AGENT:past_incidents' not in existing_sources:
-        pos = [r'\\[Source:\\s*Incident History', r'past incidents?.*found', r'similar incidents?.*found', r'\\d+\\s+(?:similar\\s+)?past incidents?']
+        pos = [r'\\[Source:\\s*Incident History', r'past incident', r'similar incident', r'past incidents?.*found', r'similar incidents?.*found', r'\\d+\\s+(?:similar\\s+)?past incidents?']
         neg = [r'no similar past incidents', r'no past incidents.*found', r'no.*similar.*incidents.*found', r'0 past incidents']
         if has_positive_evidence(pos, neg):
             recommendations.append({
@@ -139,7 +139,7 @@ def ensure_all_sources(recommendations, agent_investigation, root_causes):
 
     # AGENT:deployment_correlation - only if actual deployment was found
     if 'AGENT:deployment_correlation' not in existing_sources:
-        pos = [r'recent deployment.*found', r'deployment.*correlat', r'deploy.*version.*\\d', r'config.*change.*found', r'deploy-\\w+-\\d+', r'updated the connection pool', r'deployment on \\d{4}']
+        pos = [r'recent deployment', r'deployment.*correlat', r'deploy.*version.*\\d', r'config.*change.*found', r'deploy-\\w+-\\d+', r'updated the connection pool', r'deployment on \\d{4}']
         neg = [r'no recent deployments', r'no.*deployment.*found', r'no.*config.*change.*found', r'no deployments', r'no information available about recent deploy']
         if has_positive_evidence(pos, neg):
             recommendations.append({
@@ -192,38 +192,30 @@ def generate_summary(root_causes, agent_investigation, recommendations):
     evidence = []
     if past_count:
         evidence.append(f'{past_count.group(1)} similar past incidents confirm this pattern')
+    elif bool(re.search(r'past incident|similar incident', inv, re.IGNORECASE)):
+        # Only add if NOT negated
+        if not bool(re.search(r'no similar past incidents|no past incidents.*found|no.*similar.*incidents.*found', inv, re.IGNORECASE)):
+            evidence.append('similar past incidents found on this service')
     if has_logs:
         evidence.append('OpenSearch logs show active alarms')
     if has_deploy and not no_deploy:
         evidence.append('a recent deployment correlates with the incident start')
+    if has_runbook:
+        evidence.append('runbook guidance available')
+    # Check if agent_advice recommendations exist
+    has_advice = any(r.get('source') == 'agent_advice' for r in recs)
+    if has_advice:
+        evidence.append('agent advisory recommendations')
     if evidence:
         paragraph += f'Evidence: {", ".join(evidence)}. '
 
-    # Action plan: what to do NOW
+    # Action plan: include ALL recommendations
     paragraph += 'Action plan: '
     actions = []
-    if rollbacks:
-        desc = rollbacks[0].get('description', '').rstrip('.')
-        if len(desc) > 100:
-            desc = desc[:100].rsplit(' ', 1)[0]
-        actions.append(f'(1) {desc}')
-    if scaling:
-        desc = scaling[0].get('description', '').rstrip('.')
-        if len(desc) > 100:
-            desc = desc[:100].rsplit(' ', 1)[0]
-        actions.append(f'({"2" if rollbacks else "1"}) {desc}')
-    if config_changes:
-        desc = config_changes[0].get('description', '').rstrip('.')
-        if len(desc) > 100:
-            desc = desc[:100].rsplit(' ', 1)[0]
-        n = 1 + len([x for x in [rollbacks, scaling] if x])
-        actions.append(f'({n}) {desc}')
-    if manual and len(actions) < 3:
-        desc = manual[0].get('description', '').rstrip('.')
-        if len(desc) > 100:
-            desc = desc[:100].rsplit(' ', 1)[0]
-        n = len(actions) + 1
-        actions.append(f'({n}) {desc}')
+    for i, rec in enumerate(recs):
+        desc = rec.get('description', '').rstrip('.')
+        if desc:
+            actions.append(f'({i+1}) {desc}')
 
     if actions:
         paragraph += '; '.join(actions) + '.'

@@ -253,11 +253,56 @@ export default function IncidentDetail() {
                 const raw = incident as unknown as Record<string, unknown>
                 let summary = raw.remediation_summary as string | undefined
                 if (!summary) return null
-                // Strip any "Remediation Summary:" label prefix or suffix the model may have echoed
                 summary = summary.replace(/^Remediation Summary:\s*/i, '').replace(/\s*Remediation Summary:\s*$/i, '').trim()
-                // Strip trailing comma+period artifacts like ", ." or ",."
                 summary = summary.replace(/,\s*\.$/, '.').replace(/,\s*$/, '').trim()
                 if (!summary) return null
+
+                // Parse structured summary
+                const actionMatch = summary.match(/Action plan:\s*(.+?)(?=\.\s*Runbook|$)/i)
+                const hasRunbook = /runbook available/i.test(summary)
+
+                if (actionMatch) {
+                  // Parse action plan into numbered steps
+                  const actionText = actionMatch ? actionMatch[1].trim().replace(/\.$/, '') : ''
+                  const actionSteps = actionText
+                    ? actionText.split(/;\s*/).map(a => a.replace(/^\(\d+\)\s*/, '').trim()).filter(a => a.length > 3)
+                    : []
+
+                  return (
+                    <div className="mb-4 p-5 bg-gradient-to-br from-blue-950/30 to-purple-950/20 border border-blue-800/30 rounded-xl space-y-4 animate-fade-in-up">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-semibold text-blue-400 uppercase tracking-wider">Remediation Summary</span>
+                        <div className="flex items-center gap-2">
+                          {hasRunbook && (
+                            <span className="px-2 py-0.5 rounded-full text-[9px] font-medium bg-purple-500/15 text-purple-400 border border-purple-700/30">📋 Runbook</span>
+                          )}
+                          <span className="px-2 py-0.5 rounded-full text-[9px] font-medium bg-blue-500/15 text-blue-400 border border-blue-700/30">{incident.recommendations.length} actions</span>
+                        </div>
+                      </div>
+
+                      {actionSteps.length > 0 && (
+                        <div className="flex items-start gap-3">
+                          <span className="mt-0.5 w-6 h-6 rounded-lg bg-blue-900/30 flex items-center justify-center shrink-0 border border-blue-800/30">
+                            <span className="text-xs">⚡</span>
+                          </span>
+                          <div className="flex-1">
+                            <p className="text-[10px] font-bold text-blue-400/80 uppercase tracking-wider mb-1.5">Action Plan</p>
+                            <div className="space-y-1.5">
+                              {actionSteps.map((step, i) => (
+                                <div key={i} className="flex items-start gap-2">
+                                  <span className="w-5 h-5 rounded bg-blue-900/40 border border-blue-700/30 flex items-center justify-center text-[10px] font-bold text-blue-300 shrink-0 mt-0.5">{i + 1}</span>
+                                  <p className="text-sm text-blue-100 leading-relaxed">{step}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )
+                }
+
+                // Fallback: plain text summary (old format)
                 return (
                   <div className="mb-4 p-4 bg-blue-950/20 border border-blue-800/30 rounded-lg">
                     <p className="text-[11px] font-semibold text-blue-400 uppercase tracking-wider mb-1.5">Remediation Summary</p>
@@ -541,16 +586,8 @@ export default function IncidentDetail() {
               }
             })
 
-            // Remove empty sections, source-label-only sections, and summary if other sections exist
-            const sections = Array.from(sectionMap.values()).filter(s => {
-              if (s.items.length === 0) return false
-              // Filter sections that only contain the source label echoed back
-              if (s.items.length === 1) {
-                const only = s.items[0].toLowerCase()
-                if (/^(deployment history|runbook db|incident history db|opensearch logs?|no data|no similar|no information)/.test(only)) return false
-              }
-              return true
-            })
+            // Remove empty sections and summary if other sections exist
+            const sections = Array.from(sectionMap.values()).filter(s => s.items.length > 0)
             if (sections.length > 1) {
               const idx = sections.findIndex(s => s.title === 'Summary')
               if (idx >= 0 && sections[idx].items.length <= 1) sections.splice(idx, 1)
@@ -586,6 +623,10 @@ export default function IncidentDetail() {
                 const items = getRecContent('AGENT:deployment_correlation')
                 if (items.length > 0) sections.push({ title: 'Deployment Correlation', icon: '🚀', color: 'border-l-orange-500', items })
               }
+              if (recSources.has('agent_advice') && !sectionKeys.has('Agent Advice')) {
+                const items = getRecContent('agent_advice')
+                if (items.length > 0) sections.push({ title: 'Agent Advice', icon: '💡', color: 'border-l-yellow-500', items })
+              }
             }
 
             // If no sections remain after all processing, don't render the card
@@ -598,6 +639,7 @@ export default function IncidentDetail() {
                   <h3 className="text-sm font-semibold text-white">Autonomous Agent Investigation</h3>
                   <span className="px-2 py-0.5 rounded text-xs font-medium bg-purple-900/30 text-purple-400">Bedrock Agent</span>
                 </div>
+
                 <div className="space-y-3">
                   {sections.map((section, i) => (
                     <div
