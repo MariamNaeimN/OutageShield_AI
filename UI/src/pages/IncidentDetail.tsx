@@ -271,7 +271,11 @@ export default function IncidentDetail() {
                   const borderColor = rec.category === 'rollback' ? 'border-l-blue-500' : rec.category === 'scaling' ? 'border-l-green-500' : rec.category === 'configuration_change' ? 'border-l-amber-500' : 'border-l-gray-500'
                   const riskColor = rec.risk === 'low' ? 'text-green-400' : rec.risk === 'medium' ? 'text-yellow-400' : 'text-red-400'
                   return (
-                    <div key={i} className={`rounded-lg bg-[#0d1117] border border-gray-700/30 border-l-[3px] ${borderColor} px-4 py-3`}>
+                    <div
+                      key={i}
+                      className={`rounded-lg bg-[#0d1117] border border-gray-700/30 border-l-[3px] ${borderColor} px-4 py-3 hover-lift animate-fade-in-up`}
+                      style={{ animationDelay: `${i * 60}ms` }}
+                    >
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex items-start gap-2.5 flex-1 min-w-0">
                           <span className="text-sm mt-0.5 shrink-0">{icon}</span>
@@ -360,6 +364,8 @@ export default function IncidentDetail() {
               .replace(/^Log_findings:/gim,                '[Source: OpenSearch Logs]')
               .replace(/^Deployment_correlation:/gim,      '[Source: Deployment History]')
               .replace(/^Runbook_findings:/gim,            '[Source: Runbook DB]')
+              // Collapse multiple blank lines
+              .replace(/\n{3,}/g, '\n\n')
 
             // Parse sections using [Source: X] tags as reliable section boundaries
             // Build a map of source label → section config
@@ -379,16 +385,37 @@ export default function IncidentDetail() {
               return 'summary'
             }
 
+            // If the text starts with content before any [Source:] tag,
+            // try to infer the section from keywords in the opening block
+            const firstSourceIdx = cleanedInvestigation.search(/\[Source:/i)
+            let textToParse = cleanedInvestigation
+            if (firstSourceIdx > 50) {
+              // There's a meaningful opening block — check what it's about
+              const opening = cleanedInvestigation.slice(0, firstSourceIdx).toLowerCase()
+              let inferredTag = ''
+              if (opening.includes('deployment') || opening.includes('connection pool') || opening.includes('config')) {
+                inferredTag = '[Source: Deployment History]\n'
+              } else if (opening.includes('past incident') || opening.includes('similar incident')) {
+                inferredTag = '[Source: Incident History DB]\n'
+              } else if (opening.includes('runbook')) {
+                inferredTag = '[Source: Runbook DB]\n'
+              } else if (opening.includes('opensearch') || opening.includes('alarm') || opening.includes('log')) {
+                inferredTag = '[Source: OpenSearch Logs]\n'
+              }
+              if (inferredTag) {
+                textToParse = inferredTag + cleanedInvestigation
+              }
+            }
+
             const sectionMap = new Map<string, { title: string; icon: string; color: string; items: string[] }>()
             sectionMap.set('summary', { title: 'Summary', icon: '📝', color: 'border-l-gray-500', items: [] })
             let currentKey = 'summary'
 
-            cleanedInvestigation.split('\n').forEach(line => {
+            textToParse.split('\n').forEach(line => {
               const trimmed = line.trim()
               if (!trimmed) return
 
               // Detect [Source: X] tag — may be at start OR inline at end of line
-              // First check if the line starts with a [Source:] tag
               const sourceMatch = trimmed.match(/^\[Source:\s*([^\]]+)\]/i)
               if (sourceMatch) {
                 const key = resolveSource(sourceMatch[1])
@@ -398,7 +425,18 @@ export default function IncidentDetail() {
                   sectionMap.set(key, { ...cfg, items: [] })
                 }
                 const rest = trimmed.replace(/^\[Source:[^\]]+\]\s*/i, '').trim()
-                if (rest && rest.length > 3) sectionMap.get(currentKey)?.items.push(rest)
+                if (rest && rest.length > 3) {
+                  // Dedup check for content on same line as source tag
+                  const normalizedRest = rest.replace(/\s+/g, ' ').toLowerCase()
+                  const restPrefix = normalizedRest.slice(0, 80)
+                  const sec = sectionMap.get(currentKey)
+                  if (sec && !sec.items.some(item => {
+                    const norm = item.replace(/\s+/g, ' ').toLowerCase()
+                    return norm === normalizedRest || (restPrefix.length >= 40 && norm.startsWith(restPrefix))
+                  })) {
+                    sec.items.push(rest)
+                  }
+                }
                 return
               }
 
@@ -490,7 +528,17 @@ export default function IncidentDetail() {
               if (/^similar past incidents:/i.test(clean) && clean.length < 30) return
               // Skip lines that are just a source label echoed back (e.g. "Deployment History." "Runbook DB.")
               if (/^(deployment history|runbook db|incident history db|opensearch logs?)\.?$/i.test(clean)) return
-              sectionMap.get(currentKey)?.items.push(clean)
+              // Deduplicate — don't add if already in this section (agent often repeats content)
+              // Normalize whitespace for comparison, also check first 80 chars for near-duplicates
+              const normalizedClean = clean.replace(/\s+/g, ' ').toLowerCase()
+              const cleanPrefix = normalizedClean.slice(0, 80)
+              const existing = sectionMap.get(currentKey)
+              if (existing && !existing.items.some(item => {
+                const norm = item.replace(/\s+/g, ' ').toLowerCase()
+                return norm === normalizedClean || (cleanPrefix.length >= 40 && norm.startsWith(cleanPrefix))
+              })) {
+                existing.items.push(clean)
+              }
             })
 
             // Remove empty sections, source-label-only sections, and summary if other sections exist
@@ -508,16 +556,55 @@ export default function IncidentDetail() {
               if (idx >= 0 && sections[idx].items.length <= 1) sections.splice(idx, 1)
             }
 
+            // Add brief notes for sources that appear in recommendations but not in investigation
+            if (incident.recommendations && incident.recommendations.length > 0) {
+              const recSources = new Set(incident.recommendations.map(r => (r as any).source || ''))
+              const sectionKeys = new Set(sections.map(s => s.title))
+
+              const getRecContent = (source: string) => {
+                const rec = incident.recommendations.find(r => (r as any).source === source)
+                if (!rec) return []
+                const items: string[] = []
+                if (rec.description) items.push(rec.description)
+                if ((rec as any).reasoning) items.push((rec as any).reasoning)
+                return items
+              }
+
+              if (recSources.has('AGENT:log_patterns') && !sectionKeys.has('Log Analysis (OpenSearch)')) {
+                const items = getRecContent('AGENT:log_patterns')
+                if (items.length > 0) sections.push({ title: 'Log Analysis (OpenSearch)', icon: '📊', color: 'border-l-teal-500', items })
+              }
+              if (recSources.has('AGENT:runbook') && !sectionKeys.has('Runbook')) {
+                const items = getRecContent('AGENT:runbook')
+                if (items.length > 0) sections.push({ title: 'Runbook', icon: '📋', color: 'border-l-purple-500', items })
+              }
+              if (recSources.has('AGENT:past_incidents') && !sectionKeys.has('Past Incidents')) {
+                const items = getRecContent('AGENT:past_incidents')
+                if (items.length > 0) sections.push({ title: 'Past Incidents', icon: '🔍', color: 'border-l-blue-500', items })
+              }
+              if (recSources.has('AGENT:deployment_correlation') && !sectionKeys.has('Deployment Correlation')) {
+                const items = getRecContent('AGENT:deployment_correlation')
+                if (items.length > 0) sections.push({ title: 'Deployment Correlation', icon: '🚀', color: 'border-l-orange-500', items })
+              }
+            }
+
+            // If no sections remain after all processing, don't render the card
+            if (sections.length === 0) return null
+
             return (
-              <div className="bg-[#161b22] border border-purple-800/30 rounded-xl p-5">
+              <div className="bg-[#161b22] border border-purple-800/30 rounded-xl p-5 scan-line">
                 <div className="flex items-center gap-2 mb-4">
-                  <div className="w-2 h-2 bg-purple-500 rounded-full animate-pulse" />
+                  <div className="w-2 h-2 bg-purple-500 rounded-full animate-pulse pulse-ring" />
                   <h3 className="text-sm font-semibold text-white">Autonomous Agent Investigation</h3>
                   <span className="px-2 py-0.5 rounded text-xs font-medium bg-purple-900/30 text-purple-400">Bedrock Agent</span>
                 </div>
                 <div className="space-y-3">
                   {sections.map((section, i) => (
-                    <div key={i} className={`border-l-[3px] ${section.color} bg-gray-900/30 rounded-r-lg px-4 py-3`}>
+                    <div
+                      key={i}
+                      className={`border-l-[3px] ${section.color} bg-gray-900/30 rounded-r-lg px-4 py-3 animate-fade-in-up`}
+                      style={{ animationDelay: `${i * 80}ms` }}
+                    >
                       <div className="flex items-center gap-2 mb-1.5">
                         <span className="text-sm">{section.icon}</span>
                         <span className="text-xs font-semibold text-gray-200">{section.title}</span>
@@ -558,9 +645,14 @@ export default function IncidentDetail() {
 
           {/* Ticket */}
           {incident.ticket && (
-            <div id="ticket" className="bg-[#161b22] border border-gray-800 rounded-xl p-5 scroll-mt-6">
+            <div id="ticket" className="bg-[#161b22] border border-gray-800 rounded-xl p-5 scroll-mt-6 hover-lift animate-fade-in-up" style={{ animationDelay: '100ms' }}>
               <div className="flex items-center justify-between mb-3">
-                <h3 className="text-sm font-semibold text-white">Linked Ticket</h3>
+                <div className="flex items-center gap-2">
+                  <div className="w-7 h-7 rounded-lg bg-blue-900/25 flex items-center justify-center">
+                    <ExternalLink className="w-3.5 h-3.5 text-blue-400" />
+                  </div>
+                  <h3 className="text-sm font-semibold text-white">Linked Ticket</h3>
+                </div>
                 <a
                   href={`${JIRA_BASE_URL}/browse/${incident.ticket.id}`}
                   target="_blank"
@@ -632,13 +724,18 @@ export default function IncidentDetail() {
             try {
               const notif = JSON.parse(notifStr)
               return (
-                <div className="bg-[#161b22] border border-gray-800 rounded-xl p-5">
-                  <h3 className="text-sm font-semibold text-white mb-3">SNS Notification</h3>
-                  <div className="space-y-2">
+                <div className="bg-[#161b22] border border-gray-800 rounded-xl p-5 hover-lift animate-fade-in-up" style={{ animationDelay: '150ms' }}>
+                  <div className="flex items-center gap-2 mb-3">
+                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${notif.type === 'escalation' ? 'bg-red-900/25' : 'bg-purple-900/25'}`}>
+                      <span className="text-sm">{notif.type === 'escalation' ? '🚨' : '🔔'}</span>
+                    </div>
+                    <h3 className="text-sm font-semibold text-white">SNS Notification</h3>
+                    <span className={`ml-auto px-2 py-0.5 rounded text-[10px] font-bold ${notif.type === 'escalation' ? 'bg-red-900/50 text-red-300' : 'bg-blue-900/50 text-blue-300'}`}>
+                      {notif.type || 'alert'}
+                    </span>
+                  </div>
+                  <div className="space-y-2 animate-fade-in-up" style={{ animationDelay: '200ms' }}>
                     <div className="flex items-center gap-3">
-                      <span className={`px-2 py-0.5 rounded text-xs font-bold ${notif.type === 'escalation' ? 'bg-red-900/50 text-red-300' : 'bg-blue-900/50 text-blue-300'}`}>
-                        {notif.type || 'alert'}
-                      </span>
                       <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-900/30 text-green-300">
                         {notif.status || 'sent'}
                       </span>

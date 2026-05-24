@@ -1,8 +1,27 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
-import { RefreshCw, MoreHorizontal, CheckCircle } from 'lucide-react'
+import { RefreshCw, MoreHorizontal, CheckCircle, AlertTriangle, Shield, Activity, Radio, ChevronUp, ChevronDown, ChevronsUpDown } from 'lucide-react'
 import { PieChart, Pie, Cell, ResponsiveContainer } from 'recharts'
 import { getActiveIncidents, type Incident } from '../services/api'
+
+type SortKey = 'id' | 'service' | 'severity' | 'status' | 'detectedAt' | 'businessImpact'
+type SortDir = 'asc' | 'desc'
+
+function SortTh({ label, sortKey, current, dir, onSort }: {
+  label: string; sortKey: SortKey; current: SortKey; dir: SortDir; onSort: (k: SortKey) => void
+}) {
+  const active = current === sortKey
+  return (
+    <th className="text-left text-xs font-medium text-gray-400 uppercase px-4 py-3 cursor-pointer select-none group" onClick={() => onSort(sortKey)}>
+      <div className="flex items-center gap-1 hover:text-gray-200 transition-colors">
+        {label}
+        <span className={`transition-all duration-150 ${active ? 'text-brand-400' : 'text-gray-600 group-hover:text-gray-400'}`}>
+          {active ? (dir === 'asc' ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />) : <ChevronsUpDown className="w-3.5 h-3.5" />}
+        </span>
+      </div>
+    </th>
+  )
+}
 
 export default function Dashboard() {
   const [incidents, setIncidents] = useState<Incident[]>([])
@@ -10,7 +29,15 @@ export default function Dashboard() {
   const [page, setPage] = useState(0)
   const [eventsCount, setEventsCount] = useState(0)
   const [correlationEvents, setCorrelationEvents] = useState<Record<string, unknown>[]>([])
+  const [sortKey, setSortKey] = useState<SortKey>('detectedAt')
+  const [sortDir, setSortDir] = useState<SortDir>('desc')
   const pageSize = 10
+
+  const handleSort = (key: SortKey) => {
+    if (sortKey === key) { setSortDir(d => d === 'asc' ? 'desc' : 'asc') }
+    else { setSortKey(key); setSortDir('desc') }
+    setPage(0)
+  }
 
   const fetchData = async () => {
     try {
@@ -62,6 +89,19 @@ export default function Dashboard() {
   const activeCount = incidents.filter(i => i.status !== 'Resolved').length
   const highRiskServices = new Set(incidents.filter(i => i.severity >= 4).map(i => i.service)).size
 
+  const sortedIncidents = [...incidents].sort((a, b) => {
+    let av: string | number = 0, bv: string | number = 0
+    if (sortKey === 'id')             { av = a.id;             bv = b.id }
+    if (sortKey === 'service')        { av = a.service;        bv = b.service }
+    if (sortKey === 'severity')       { av = a.severity;       bv = b.severity }
+    if (sortKey === 'status')         { av = a.status;         bv = b.status }
+    if (sortKey === 'detectedAt')     { av = a.detectedAt;     bv = b.detectedAt }
+    if (sortKey === 'businessImpact') { av = a.businessImpact; bv = b.businessImpact }
+    if (av < bv) return sortDir === 'asc' ? -1 : 1
+    if (av > bv) return sortDir === 'asc' ? 1 : -1
+    return 0
+  })
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -71,20 +111,55 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fade-in-up">
       <div className="flex items-center justify-between">
-        <h2 className="text-2xl font-bold text-white">Dashboard</h2>
-        <button className="p-2 text-gray-400 hover:text-gray-200">
+        <div>
+          <h2 className="text-2xl font-bold text-white">Dashboard</h2>
+          <p className="text-xs text-gray-500 mt-0.5">Real-time incident intelligence</p>
+        </div>
+        <button className="p-2 text-gray-400 hover:text-gray-200 transition-colors">
           <MoreHorizontal className="w-5 h-5" />
         </button>
       </div>
 
       {/* Stats Cards */}
-      <div className="grid grid-cols-4 gap-4">
-        <StatCard label="Active Incidents" value={activeCount} color="red" />
-        <StatCard label="High Risk Services" value={highRiskServices} color="orange" />
-        <StatCard label="Total Incidents (24h)" value={incidents.length} color="blue" />
-        <StatCard label="Raw Events" value={eventsCount} color="green" />
+      <div className="grid grid-cols-4 gap-4 stagger-children">
+        <StatCard
+          label="Active Incidents"
+          value={activeCount}
+          color="red"
+          delay={0}
+          icon={<AlertTriangle className="w-5 h-5" />}
+          trend={activeCount > 0 ? `${activeCount} need attention` : 'All clear'}
+          sub="Non-resolved incidents"
+        />
+        <StatCard
+          label="High Risk Services"
+          value={highRiskServices}
+          color="orange"
+          delay={60}
+          icon={<Shield className="w-5 h-5" />}
+          trend={highRiskServices > 0 ? `SEV-4+ active` : 'No critical services'}
+          sub="Services with SEV ≥ 4"
+        />
+        <StatCard
+          label="Total Incidents (24h)"
+          value={incidents.length}
+          color="blue"
+          delay={120}
+          icon={<Activity className="w-5 h-5" />}
+          trend={`${incidents.filter(i => i.status === 'Resolved').length} resolved`}
+          sub="All incidents today"
+        />
+        <StatCard
+          label="Raw Events"
+          value={eventsCount}
+          color="green"
+          delay={180}
+          icon={<Radio className="w-5 h-5" />}
+          trend="CloudWatch alarms"
+          sub="Detection signals ingested"
+        />
       </div>
 
       {/* Active Incidents Table */}
@@ -104,18 +179,22 @@ export default function Dashboard() {
               <table className="w-full">
                 <thead>
                   <tr className="border-b border-gray-800">
-                    <th className="text-left text-xs font-medium text-gray-400 uppercase px-4 py-3">ID</th>
+                    <SortTh label="ID"              sortKey="id"             current={sortKey} dir={sortDir} onSort={handleSort} />
                     <th className="text-left text-xs font-medium text-gray-400 uppercase px-4 py-3">Source</th>
-                    <th className="text-left text-xs font-medium text-gray-400 uppercase px-4 py-3">Service</th>
-                    <th className="text-left text-xs font-medium text-gray-400 uppercase px-4 py-3">Severity</th>
-                    <th className="text-left text-xs font-medium text-gray-400 uppercase px-4 py-3">Status</th>
-                    <th className="text-left text-xs font-medium text-gray-400 uppercase px-4 py-3">Age</th>
-                    <th className="text-left text-xs font-medium text-gray-400 uppercase px-4 py-3">Business Impact</th>
+                    <SortTh label="Service"         sortKey="service"        current={sortKey} dir={sortDir} onSort={handleSort} />
+                    <SortTh label="Severity"        sortKey="severity"       current={sortKey} dir={sortDir} onSort={handleSort} />
+                    <SortTh label="Status"          sortKey="status"         current={sortKey} dir={sortDir} onSort={handleSort} />
+                    <SortTh label="Age"             sortKey="detectedAt"     current={sortKey} dir={sortDir} onSort={handleSort} />
+                    <SortTh label="Business Impact" sortKey="businessImpact" current={sortKey} dir={sortDir} onSort={handleSort} />
                   </tr>
                 </thead>
                 <tbody>
-                  {incidents.slice(page * pageSize, (page + 1) * pageSize).map(incident => (
-                    <tr key={incident.id} className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-colors">
+                  {sortedIncidents.slice(page * pageSize, (page + 1) * pageSize).map((incident, idx) => (
+                    <tr
+                      key={incident.id}
+                      className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-all duration-150 animate-fade-in-up"
+                      style={{ animationDelay: `${idx * 30}ms` }}
+                    >
                       <td className="px-4 py-3">
                         <Link to={`/incidents/${incident.id}`} className="text-sm font-medium text-blue-400 hover:text-blue-300">
                           {incident.id}
@@ -137,23 +216,11 @@ export default function Dashboard() {
             {/* Pagination */}
             <div className="flex items-center justify-between mt-3">
               <span className="text-xs text-gray-500">
-                Showing {page * pageSize + 1}–{Math.min((page + 1) * pageSize, incidents.length)} of {incidents.length}
+                Showing {page * pageSize + 1}–{Math.min((page + 1) * pageSize, sortedIncidents.length)} of {sortedIncidents.length}
               </span>
               <div className="flex gap-2">
-                <button
-                  onClick={() => setPage(p => Math.max(0, p - 1))}
-                  disabled={page === 0}
-                  className="px-3 py-1.5 text-xs bg-gray-800 text-gray-300 rounded-lg disabled:opacity-30 hover:bg-gray-700"
-                >
-                  Previous
-                </button>
-                <button
-                  onClick={() => setPage(p => p + 1)}
-                  disabled={(page + 1) * pageSize >= incidents.length}
-                  className="px-3 py-1.5 text-xs bg-gray-800 text-gray-300 rounded-lg disabled:opacity-30 hover:bg-gray-700"
-                >
-                  Next
-                </button>
+                <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0} className="px-3 py-1.5 text-xs bg-gray-800 text-gray-300 rounded-lg disabled:opacity-30 hover:bg-gray-700">Previous</button>
+                <button onClick={() => setPage(p => p + 1)} disabled={(page + 1) * pageSize >= sortedIncidents.length} className="px-3 py-1.5 text-xs bg-gray-800 text-gray-300 rounded-lg disabled:opacity-30 hover:bg-gray-700">Next</button>
               </div>
             </div>
           </>
@@ -272,13 +339,57 @@ export default function Dashboard() {
   )
 }
 
-function StatCard({ label, value, color }: { label: string; value: number | string; color: string }) {
-  const borderColors: Record<string, string> = { red: 'border-red-900/60', orange: 'border-orange-900/60', blue: 'border-blue-900/60', green: 'border-green-900/60' }
-  const labelColors: Record<string, string> = { red: 'text-red-400', orange: 'text-orange-400', blue: 'text-blue-400', green: 'text-green-400' }
+function StatCard({ label, value, color, delay = 0, icon, trend, sub }: {
+  label: string
+  value: number | string
+  color: string
+  delay?: number
+  icon?: React.ReactNode
+  trend?: string
+  sub?: string
+}) {
+  const [hovered, setHovered] = useState(false)
+
+  const styles: Record<string, { border: string; label: string; iconBg: string; iconColor: string; bar: string; glow: string }> = {
+    red:    { border: 'border-red-900/60',    label: 'text-red-400',    iconBg: 'bg-red-900/30',    iconColor: 'text-red-400',    bar: 'bg-red-500',    glow: 'shadow-red-500/10' },
+    orange: { border: 'border-orange-900/60', label: 'text-orange-400', iconBg: 'bg-orange-900/30', iconColor: 'text-orange-400', bar: 'bg-orange-500', glow: 'shadow-orange-500/10' },
+    blue:   { border: 'border-blue-900/60',   label: 'text-blue-400',   iconBg: 'bg-blue-900/30',   iconColor: 'text-blue-400',   bar: 'bg-blue-500',   glow: 'shadow-blue-500/10' },
+    green:  { border: 'border-green-900/60',  label: 'text-green-400',  iconBg: 'bg-green-900/30',  iconColor: 'text-green-400',  bar: 'bg-green-500',  glow: 'shadow-green-500/10' },
+  }
+  const s = styles[color]
+
   return (
-    <div className={`bg-[#161b22] border ${borderColors[color]} rounded-xl p-4`}>
-      <p className={`text-xs font-medium ${labelColors[color]} mb-1`}>{label}</p>
-      <p className="text-3xl font-bold text-white">{value}</p>
+    <div
+      className={`relative bg-[#161b22] border ${s.border} rounded-xl p-4 cursor-default animate-fade-in-up transition-all duration-300 ${
+        hovered ? `shadow-lg ${s.glow} -translate-y-1 border-opacity-80` : 'hover-lift'
+      }`}
+      style={{ animationDelay: `${delay}ms` }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      {/* Top row: icon + pulse dot */}
+      <div className="flex items-start justify-between mb-3">
+        <div className={`w-9 h-9 ${s.iconBg} rounded-xl flex items-center justify-center ${s.iconColor} transition-transform duration-300 ${hovered ? 'scale-110' : ''}`}>
+          {icon}
+        </div>
+        <span className={`w-2 h-2 rounded-full ${s.bar} animate-pulse mt-1`} />
+      </div>
+
+      {/* Value */}
+      <p className={`text-3xl font-bold text-white animate-count-up transition-all duration-300 ${hovered ? 'scale-105' : ''}`}
+         style={{ animationDelay: `${delay + 100}ms`, transformOrigin: 'left' }}>
+        {value}
+      </p>
+
+      {/* Label */}
+      <p className={`text-xs font-medium ${s.label} mt-1`}>{label}</p>
+
+      {/* Hover tooltip panel */}
+      <div className={`overflow-hidden transition-all duration-300 ${hovered ? 'max-h-20 opacity-100 mt-3' : 'max-h-0 opacity-0'}`}>
+        <div className={`h-px ${s.bar} opacity-20 mb-2`} />
+        <p className="text-[11px] text-gray-300 font-medium">{trend}</p>
+        <p className="text-[10px] text-gray-500 mt-0.5">{sub}</p>
+      </div>
     </div>
   )
 }

@@ -131,7 +131,16 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 
 export async function getActiveIncidents(): Promise<Incident[]> {
   const data = await fetchJson<{ incidents: Record<string, unknown>[]; count: number }>('/incidents')
-  return data.incidents.map(mapIncident)
+  return data.incidents
+    .map(raw => {
+      try {
+        return mapIncident(raw)
+      } catch (e) {
+        console.error('[mapIncident] failed for', raw?.incident_id, e)
+        return null
+      }
+    })
+    .filter((i): i is Incident => i !== null)
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -173,10 +182,9 @@ function mapIncident(raw: any): Incident {
     if (!arr[0]?.description) return null
 
     // Filter out parse-error entries
-    return arr
+    const filtered = arr
       .filter((item: any) => {
         const desc = String(item.description || '')
-        // Skip entries where description is a JSON string or parse error
         return !desc.trim().startsWith('[') && !desc.trim().startsWith('{') && !desc.includes('Parse error:')
       })
       .map((item: any) => ({
@@ -188,11 +196,12 @@ function mapIncident(raw: any): Incident {
             ? [String(item.evidence)]
             : []
       }))
-      .filter(item => item.description.length > 0) || null
+      .filter(item => item.description.length > 0)
+    return filtered.length > 0 ? filtered : null
   }
 
   const parsed = tryParseRootCauses(rawRootCause)
-  if (parsed) {
+  if (parsed && parsed.length > 0) {
     rootCauses = parsed
     rootCause = parsed[0].description
   } else {

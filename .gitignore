@@ -4,3 +4,8 @@ dist/
 *.pyc
 __pycache__/
 .DS_Store
+
+# Utility scripts (not for repo)
+scripts/clear-and-push.py
+scripts/debug-patterns.py
+scripts/rerun-all-remediation.py

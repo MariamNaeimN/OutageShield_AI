@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Bell, Ticket, RefreshCw, ChevronRight, ExternalLink } from 'lucide-react'
+import { Bell, Ticket, ChevronRight, ExternalLink } from 'lucide-react'
 import { getActiveIncidents } from '../services/api'
 
 const JIRA_BASE_URL = 'https://corpinfollc.atlassian.net'
@@ -88,44 +88,91 @@ export default function Notifications() {
   }, [])
 
   if (loading) {
-    return <div className="flex items-center justify-center h-64"><RefreshCw className="w-6 h-6 text-brand-500 animate-spin" /></div>
+    return (
+      <div className="space-y-6 animate-fade-in-up">
+        <div className="skeleton h-8 w-64 rounded-lg" />
+        <div className="skeleton h-5 w-48 rounded" />
+        <div className="skeleton h-10 w-56 rounded-lg" />
+        <div className="space-y-2">
+          {[...Array(6)].map((_, i) => (
+            <div key={i} className="skeleton h-16 w-full rounded-xl" style={{ animationDelay: `${i * 60}ms` }} />
+          ))}
+        </div>
+      </div>
+    )
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fade-in-up">
       <div>
         <h2 className="text-2xl font-bold text-white">Notifications & Tickets</h2>
         <p className="text-sm text-gray-500 mt-1">SNS alerts and Jira tickets created by the agent</p>
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 bg-[#161b22] border border-gray-800 rounded-lg p-0.5 w-fit">
-        <button onClick={() => setTab('tickets')} className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${tab === 'tickets' ? 'bg-blue-900/40 text-blue-400' : 'text-gray-400 hover:text-gray-200'}`}>
-          <Ticket className="w-4 h-4 inline mr-2" />Tickets ({tickets.length})
+      <div className="relative flex gap-1 bg-[#161b22] border border-gray-800 rounded-xl p-1 w-fit">
+        {/* Animated sliding indicator */}
+        <div
+          className="absolute top-1 bottom-1 rounded-lg transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+          style={{
+            left: tab === 'tickets' ? '4px' : '50%',
+            width: 'calc(50% - 4px)',
+            background: tab === 'tickets'
+              ? 'linear-gradient(135deg, rgba(59,130,246,0.2), rgba(99,102,241,0.15))'
+              : 'linear-gradient(135deg, rgba(168,85,247,0.2), rgba(139,92,246,0.15))',
+            boxShadow: tab === 'tickets'
+              ? '0 0 12px rgba(59,130,246,0.15)'
+              : '0 0 12px rgba(168,85,247,0.15)',
+          }}
+        />
+        <button
+          onClick={() => setTab('tickets')}
+          className={`relative z-10 flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 ${
+            tab === 'tickets' ? 'text-blue-400' : 'text-gray-400 hover:text-gray-200'
+          }`}
+        >
+          <Ticket className={`w-4 h-4 transition-transform duration-200 ${tab === 'tickets' ? 'scale-110' : ''}`} />
+          <span>Tickets</span>
+          <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold transition-all duration-200 ${
+            tab === 'tickets' ? 'bg-blue-500/20 text-blue-300' : 'bg-gray-800 text-gray-500'
+          }`}>{tickets.length}</span>
         </button>
-        <button onClick={() => setTab('sns')} className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${tab === 'sns' ? 'bg-blue-900/40 text-blue-400' : 'text-gray-400 hover:text-gray-200'}`}>
-          <Bell className="w-4 h-4 inline mr-2" />SNS Alerts ({notifications.length})
+        <button
+          onClick={() => setTab('sns')}
+          className={`relative z-10 flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 ${
+            tab === 'sns' ? 'text-purple-400' : 'text-gray-400 hover:text-gray-200'
+          }`}
+        >
+          <Bell className={`w-4 h-4 transition-transform duration-200 ${tab === 'sns' ? 'scale-110 animate-pulse' : ''}`} />
+          <span>SNS Alerts</span>
+          <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold transition-all duration-200 ${
+            tab === 'sns' ? 'bg-purple-500/20 text-purple-300' : 'bg-gray-800 text-gray-500'
+          }`}>{notifications.length}</span>
         </button>
       </div>
 
       {/* Tickets Tab */}
       {tab === 'tickets' && (
-        <div className="space-y-2">
+        <div className="space-y-2 animate-fade-in-up">
           {tickets.length === 0 ? (
-            <div className="bg-[#161b22] border border-gray-800 rounded-xl p-8 text-center text-gray-500">No tickets</div>
+            <div className="bg-[#161b22] border border-gray-800 rounded-xl p-8 text-center text-gray-500 animate-scale-in">No tickets</div>
           ) : tickets.map((t, i) => (
-            <ExpandableTicket key={i} ticket={t} />
+            <div key={i} className="animate-fade-in-up" style={{ animationDelay: `${Math.min(i * 40, 400)}ms` }}>
+              <ExpandableTicket ticket={t} />
+            </div>
           ))}
         </div>
       )}
 
       {/* SNS Tab */}
       {tab === 'sns' && (
-        <div className="space-y-2">
+        <div className="space-y-2 animate-fade-in-up">
           {notifications.length === 0 ? (
-            <div className="bg-[#161b22] border border-gray-800 rounded-xl p-8 text-center text-gray-500">No SNS alerts</div>
+            <div className="bg-[#161b22] border border-gray-800 rounded-xl p-8 text-center text-gray-500 animate-scale-in">No SNS alerts</div>
           ) : notifications.map((n, i) => (
-            <ExpandableNotification key={i} notif={n} />
+            <div key={i} className="animate-fade-in-up" style={{ animationDelay: `${Math.min(i * 40, 400)}ms` }}>
+              <ExpandableNotification notif={n} />
+            </div>
           ))}
         </div>
       )}
@@ -138,7 +185,7 @@ function ExpandableTicket({ ticket }: { ticket: TicketRecord }) {
   const jiraUrl = `${JIRA_BASE_URL}/browse/${ticket.ticket_id}`
 
   return (
-    <div className="bg-[#161b22] border border-gray-800 rounded-xl overflow-hidden hover:border-blue-800/50 transition-colors">
+    <div className="bg-[#161b22] border border-gray-800 rounded-xl overflow-hidden hover:border-blue-800/50 hover-lift transition-all duration-200">
       <div className="flex items-center justify-between px-4 py-3">
         <div className="flex items-center gap-4 min-w-0 flex-1 cursor-pointer" onClick={() => navigate(`/tickets/${ticket.incident_id}`)}>
           <div className="w-8 h-8 bg-blue-900/30 rounded-lg flex items-center justify-center flex-shrink-0">
@@ -178,7 +225,7 @@ function ExpandableTicket({ ticket }: { ticket: TicketRecord }) {
 function ExpandableNotification({ notif }: { notif: NotificationRecord }) {
   const navigate = useNavigate()
   return (
-    <div className="bg-[#161b22] border border-gray-800 rounded-xl overflow-hidden cursor-pointer hover:border-purple-800/50 transition-colors" onClick={() => navigate(`/sns/${notif.incident_id}`)}>
+    <div className="bg-[#161b22] border border-gray-800 rounded-xl overflow-hidden cursor-pointer hover:border-purple-800/50 hover-lift transition-all duration-200" onClick={() => navigate(`/sns/${notif.incident_id}`)}>
       <div className="flex items-center justify-between px-4 py-3">
         <div className="flex items-center gap-4">
           <span className={`px-2 py-0.5 rounded text-xs font-bold ${notif.type === 'escalation' ? 'bg-red-900/50 text-red-300' : 'bg-blue-900/50 text-blue-300'}`}>

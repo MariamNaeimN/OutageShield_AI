@@ -62,14 +62,14 @@ export default function Postmortems() {
   }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-3 animate-fade-in-up">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold text-white">Postmortems</h2>
           <p className="text-sm text-gray-500 mt-1">AI-generated incident analysis & prevention recommendations</p>
         </div>
-        <span className="px-3 py-1.5 bg-[#161b22] border border-gray-800 rounded-lg text-xs text-gray-400 font-medium">
+        <span className="px-3 py-1.5 bg-[#161b22] border border-gray-800 rounded-lg text-xs text-gray-400 font-medium animate-count-up">
           {filtered.length} reports
         </span>
       </div>
@@ -102,15 +102,16 @@ export default function Postmortems() {
 
             {/* List */}
             <div className="flex-1 overflow-y-auto space-y-1 pr-1">
-              {filtered.map(pm => (
+              {filtered.map((pm, idx) => (
                 <button
                   key={pm.id}
                   onClick={() => setSelectedPm(pm)}
-                  className={`w-full text-left px-3 py-3 rounded-lg transition-all ${
+                  className={`w-full text-left px-3 py-3 rounded-lg transition-all duration-200 animate-fade-in-up ${
                     selectedPm?.id === pm.id
-                      ? 'bg-blue-900/20 border border-blue-800/40'
-                      : 'hover:bg-gray-800/40 border border-transparent'
+                      ? 'bg-blue-900/20 border border-blue-800/40 shadow-sm shadow-blue-500/5 scale-[1.01]'
+                      : 'hover:bg-gray-800/40 border border-transparent hover:translate-x-0.5'
                   }`}
+                  style={{ animationDelay: `${Math.min(idx * 30, 300)}ms` }}
                 >
                   <div className="flex items-center gap-2.5">
                     <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
@@ -133,7 +134,7 @@ export default function Postmortems() {
           {/* Right Panel — Detail */}
           <div className="flex-1 bg-[#161b22] border border-gray-800 rounded-xl overflow-y-auto">
             {selectedPm ? (
-              <div className="p-6">
+              <div className="p-6 animate-fade-in-up">
                 {/* Header */}
                 <div className="flex items-start justify-between mb-6">
                   <div>
@@ -172,13 +173,13 @@ export default function Postmortems() {
 
                 {/* Summary */}
                 {(selectedPm.summary || selectedPm.impactSummary) && (
-                  <div className="mb-5 p-4 bg-gray-900/60 rounded-lg border-l-4 border-blue-600">
+                  <div className="mb-5 p-4 bg-gray-900/60 rounded-lg border-l-4 border-blue-600 animate-slide-in-right" style={{ animationDelay: '50ms' }}>
                     <p className="text-sm text-gray-200 leading-relaxed">{selectedPm.summary || selectedPm.impactSummary}</p>
                   </div>
                 )}
 
                 {/* Root Cause */}
-                <div className="mb-5">
+                <div className="mb-5 animate-slide-in-right" style={{ animationDelay: '100ms' }}>
                   <div className="flex items-center gap-2 mb-3">
                     <div className="w-7 h-7 rounded-lg bg-orange-900/25 flex items-center justify-center">
                       <AlertTriangle className="w-4 h-4 text-orange-400" />
@@ -191,7 +192,7 @@ export default function Postmortems() {
                 {/* Impact — only show if it has real data, not placeholder */}
                 {selectedPm.impactSummary && selectedPm.impactSummary !== selectedPm.summary &&
                  !selectedPm.impactSummary.includes('Revenue at risk: Unknown') && (
-                  <div className="mb-5">
+                  <div className="mb-5 animate-slide-in-right" style={{ animationDelay: '150ms' }}>
                     <div className="flex items-center gap-2 mb-3">
                       <div className="w-7 h-7 rounded-lg bg-blue-900/25 flex items-center justify-center">
                         <Users className="w-4 h-4 text-blue-400" />
@@ -210,7 +211,7 @@ export default function Postmortems() {
 
                 {/* Scoring Reasoning */}
                 {selectedPm.scoringReasoning && (
-                  <div className="mb-5">
+                  <div className="mb-5 animate-slide-in-right" style={{ animationDelay: '200ms' }}>
                     <div className="flex items-center gap-2 mb-3">
                       <div className="w-7 h-7 rounded-lg bg-purple-900/25 flex items-center justify-center">
                         <Zap className="w-4 h-4 text-purple-400" />
@@ -232,7 +233,7 @@ export default function Postmortems() {
                     </div>
                     <div className="space-y-3 pl-9">
                       {selectedPm.prevention.map((step, i) => (
-                        <div key={i} className="flex items-start gap-3">
+                        <div key={i} className="flex items-start gap-3 animate-fade-in-up" style={{ animationDelay: `${i * 80}ms` }}>
                           <span className="flex-shrink-0 w-6 h-6 bg-green-900/20 border border-green-800/30 rounded-md flex items-center justify-center text-xs text-green-400 font-bold mt-0.5">
                             {i + 1}
                           </span>

@@ -76,22 +76,29 @@ def ensure_all_sources(recommendations, agent_investigation, root_causes):
     inv = agent_investigation or ''
 
     def has_positive_evidence(positive_patterns, negative_patterns):
-        has_pos = any(re.search(p, inv, re.IGNORECASE) for p in positive_patterns)
-        has_neg = any(re.search(p, inv, re.IGNORECASE) for p in negative_patterns)
+        has_pos = any(re.search(p, inv, re.IGNORECASE | re.DOTALL) for p in positive_patterns)
+        has_neg = any(re.search(p, inv, re.IGNORECASE | re.DOTALL) for p in negative_patterns)
         return has_pos and not has_neg
 
     # AGENT:runbook - only if runbook had actual steps
     if 'AGENT:runbook' not in existing_sources:
-        pos = [r'runbook.*steps?', r'runbook.*provides?', r'runbook.*contains?', r'runbook.*guidance', r'runbook.*general']
-        neg = [r'no runbook.*found', r'no runbook entries', r'runbook.*not found', r'runbook.*does not contain', r'no.*runbook', r'no data found', r'no information']
+        pos = [r'\\[Source:\\s*Runbook', r'runbook.*steps?', r'runbook.*provides?', r'runbook.*contains?', r'runbook.*guidance', r'runbook.*general']
+        neg = [r'no runbook.*found', r'no runbook entries', r'runbook.*not found', r'no.*runbook.*data']
         if has_positive_evidence(pos, neg):
-            runbook_steps = 'review CloudWatch metrics for resource spikes, check recent deployments, review application logs for error patterns'
-            m = re.search(r'runbook[^.]*?steps?[^.]*?:([^.]+\\.)', inv, re.IGNORECASE)
-            if m:
-                runbook_steps = m.group(1).strip()
+            # Extract actual runbook content from agent investigation
+            runbook_desc = ''
+            runbook_match = re.search(r'\\[Source:\\s*Runbook[^\\]]*\\]\\s*(.+?)(?=\\[Source:|$)', inv, re.IGNORECASE | re.DOTALL)
+            if runbook_match:
+                runbook_desc = runbook_match.group(1).strip()[:200]
+            if not runbook_desc:
+                runbook_match2 = re.search(r'runbook for.*?(?:provides?|contains?|suggests?)(.+?)(?:\\.|$)', inv, re.IGNORECASE)
+                if runbook_match2:
+                    runbook_desc = runbook_match2.group(0).strip()[:200]
+            if not runbook_desc:
+                runbook_desc = 'Follow the runbook steps: review CloudWatch metrics for resource spikes, check recent deployments, review application logs for error patterns'
             recommendations.append({
                 'category': 'manual_intervention',
-                'description': f'Follow the runbook steps: {runbook_steps}',
+                'description': runbook_desc,
                 'reasoning': 'The runbook for this alarm type provides troubleshooting steps that should be followed as part of the incident response.',
                 'source': 'AGENT:runbook',
                 'effectiveness': 3, 'risk': 'low', 'estimated_ttr_minutes': 90, 'confidence': 75
@@ -99,12 +106,19 @@ def ensure_all_sources(recommendations, agent_investigation, root_causes):
 
     # AGENT:log_patterns - only if OpenSearch returned actual alarm data
     if 'AGENT:log_patterns' not in existing_sources:
-        pos = [r'\\[Source:\\s*OpenSearch', r'alarm.*found', r'alarms.*show', r'log.*show', r'5xx|latency|timeout|error rate|CPU|memory|disk']
-        neg = [r'no.*log.*found', r'no.*alarm.*found', r'no.*opensearch.*found', r'no.*patterns.*found', r'no data found', r'no information']
+        pos = [r'\\[Source:\\s*OpenSearch', r'alarm.*found', r'alarms.*show', r'log.*show', r'5xx|latency|timeout|error rate|CPU|memory|disk|health check|queue']
+        neg = [r'no.*log.*found', r'no.*alarm.*found', r'no.*opensearch.*found', r'no.*log.*patterns.*found']
         if has_positive_evidence(pos, neg):
+            # Extract actual OpenSearch findings from agent investigation
+            log_desc = ''
+            log_match = re.search(r'\\[Source:\\s*OpenSearch[^\\]]*\\]\\s*(.+?)(?=\\[Source:|$)', inv, re.IGNORECASE | re.DOTALL)
+            if log_match:
+                log_desc = log_match.group(1).strip()[:200]
+            if not log_desc:
+                log_desc = 'Investigate the specific error patterns found in OpenSearch logs to identify the affected endpoints and correlate with the root cause.'
             recommendations.append({
                 'category': 'manual_intervention',
-                'description': 'Investigate the specific error patterns found in OpenSearch logs to identify the affected endpoints and correlate with the root cause.',
+                'description': log_desc,
                 'reasoning': 'OpenSearch logs revealed high-severity alarms indicating performance degradation.',
                 'source': 'AGENT:log_patterns',
                 'effectiveness': 3, 'risk': 'low', 'estimated_ttr_minutes': 120, 'confidence': 80
@@ -113,7 +127,7 @@ def ensure_all_sources(recommendations, agent_investigation, root_causes):
     # AGENT:past_incidents - only if actual past incidents were found
     if 'AGENT:past_incidents' not in existing_sources:
         pos = [r'\\[Source:\\s*Incident History', r'past incidents?.*found', r'similar incidents?.*found', r'\\d+\\s+(?:similar\\s+)?past incidents?']
-        neg = [r'no similar past incidents', r'no past incidents.*found', r'no.*similar.*found', r'0 past incidents', r'no data found', r'no information']
+        neg = [r'no similar past incidents', r'no past incidents.*found', r'no.*similar.*incidents.*found', r'0 past incidents']
         if has_positive_evidence(pos, neg):
             recommendations.append({
                 'category': 'manual_intervention',
@@ -126,7 +140,7 @@ def ensure_all_sources(recommendations, agent_investigation, root_causes):
     # AGENT:deployment_correlation - only if actual deployment was found
     if 'AGENT:deployment_correlation' not in existing_sources:
         pos = [r'recent deployment.*found', r'deployment.*correlat', r'deploy.*version.*\\d', r'config.*change.*found', r'deploy-\\w+-\\d+', r'updated the connection pool', r'deployment on \\d{4}']
-        neg = [r'no recent deployments', r'no.*deployment.*found', r'no.*config.*change.*found', r'no deployments', r'no information available about recent', r'no data found', r'no information']
+        neg = [r'no recent deployments', r'no.*deployment.*found', r'no.*config.*change.*found', r'no deployments', r'no information available about recent deploy']
         if has_positive_evidence(pos, neg):
             recommendations.append({
                 'category': 'rollback',
@@ -140,44 +154,87 @@ def ensure_all_sources(recommendations, agent_investigation, root_causes):
 
 
 def generate_summary(root_causes, agent_investigation, recommendations):
-    parts = []
     inv = agent_investigation or ''
 
-    past_count = re.search(r'(\\d+)\\s+(?:similar\\s+)?past incidents?', inv, re.IGNORECASE)
-    if past_count:
-        parts.append(f'Based on {past_count.group(1)} similar past incidents found')
+    # Count past incidents
+    past_count = re.search(r'(\d+)\s+(?:similar\s+)?past incidents?', inv, re.IGNORECASE)
 
-    if 'OpenSearch' in inv or 'log' in inv.lower():
-        alarm_types = [a for a in ['5xx', 'latency', 'timeout', 'error rate', 'health check', 'CPU', 'memory', 'disk', 'queue'] if a.lower() in inv.lower()]
-        if alarm_types:
-            parts.append(f'OpenSearch logs showing {", ".join(alarm_types[:3])}')
-
-    # Only mention deployment if positive evidence (not "no deployments found")
-    has_deploy = bool(re.search(r'deployment.*correlat|recent deployment.*found|deploy-\\w+-\\d+|updated the connection pool|deployment on \\d{4}', inv, re.IGNORECASE))
+    # Detect evidence
+    has_logs = bool(re.search(r'OpenSearch|alarm|5xx|latency|timeout|error rate|CPU|memory|health check|queue', inv, re.IGNORECASE))
+    has_deploy = bool(re.search(r'deployment.*correlat|recent deployment.*found|deploy-\w+-\d+|updated the connection pool|deployment on \d{4}', inv, re.IGNORECASE))
     no_deploy = bool(re.search(r'no recent deployments|no.*deployment.*found|no information available about recent', inv, re.IGNORECASE))
-    if has_deploy and not no_deploy:
-        parts.append('recent deployment/config changes identified')
+    has_runbook = bool(re.search(r'runbook.*steps|runbook.*provides|runbook.*general|\[Source:\s*Runbook', inv, re.IGNORECASE | re.DOTALL))
 
-    top_recs = [r for r in (recommendations or []) if r.get('source', '') != 'agent_advice'] or (recommendations or [])
-    if top_recs:
-        desc = top_recs[0].get('description', '')
-        if len(desc) > 120:
-            desc = desc[:120].rsplit(' ', 1)[0].rstrip('.,')
-        if desc:
-            parts.append(f'primary action: {desc}')
+    # Get root cause
+    rc_desc = ''
+    if root_causes:
+        rc_desc = root_causes[0].get('description', '') if isinstance(root_causes[0], dict) else str(root_causes[0])
 
-    if not parts:
-        if root_causes:
-            rc = root_causes[0].get('description', '') if isinstance(root_causes[0], dict) else str(root_causes[0])
-            if rc:
-                return f'Based on root cause analysis: {rc[:150]}.'
+    # Categorize recommendations by type
+    recs = recommendations or []
+    rollbacks = [r for r in recs if r.get('category') == 'rollback']
+    scaling = [r for r in recs if r.get('category') == 'scaling']
+    config_changes = [r for r in recs if r.get('category') == 'configuration_change']
+    manual = [r for r in recs if r.get('category') == 'manual_intervention']
+
+    if not recs and not rc_desc:
         return ''
 
-    if len(parts) == 1:
-        return f'{parts[0]}.'
+    # Build SRE-friendly paragraph
+    paragraph = ''
 
-    action_part = parts[-1].rstrip('.,').strip()
-    return f'{"; ".join(parts[:-1])} -- {action_part}.'
+    # Opening: what happened
+    if rc_desc:
+        rc_clean = rc_desc.rstrip('.')
+        paragraph += f'Root cause: {rc_clean}. '
+
+    # What evidence supports this
+    evidence = []
+    if past_count:
+        evidence.append(f'{past_count.group(1)} similar past incidents confirm this pattern')
+    if has_logs:
+        evidence.append('OpenSearch logs show active alarms')
+    if has_deploy and not no_deploy:
+        evidence.append('a recent deployment correlates with the incident start')
+    if evidence:
+        paragraph += f'Evidence: {", ".join(evidence)}. '
+
+    # Action plan: what to do NOW
+    paragraph += 'Action plan: '
+    actions = []
+    if rollbacks:
+        desc = rollbacks[0].get('description', '').rstrip('.')
+        if len(desc) > 100:
+            desc = desc[:100].rsplit(' ', 1)[0]
+        actions.append(f'(1) {desc}')
+    if scaling:
+        desc = scaling[0].get('description', '').rstrip('.')
+        if len(desc) > 100:
+            desc = desc[:100].rsplit(' ', 1)[0]
+        actions.append(f'({"2" if rollbacks else "1"}) {desc}')
+    if config_changes:
+        desc = config_changes[0].get('description', '').rstrip('.')
+        if len(desc) > 100:
+            desc = desc[:100].rsplit(' ', 1)[0]
+        n = 1 + len([x for x in [rollbacks, scaling] if x])
+        actions.append(f'({n}) {desc}')
+    if manual and len(actions) < 3:
+        desc = manual[0].get('description', '').rstrip('.')
+        if len(desc) > 100:
+            desc = desc[:100].rsplit(' ', 1)[0]
+        n = len(actions) + 1
+        actions.append(f'({n}) {desc}')
+
+    if actions:
+        paragraph += '; '.join(actions) + '.'
+    else:
+        paragraph += 'Manual investigation required.'
+
+    # Runbook note
+    if has_runbook:
+        paragraph += ' Runbook available for reference.'
+
+    return paragraph
 
 
 def build_remediation_prompt(root_causes, context, agent_investigation):
