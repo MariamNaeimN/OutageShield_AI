@@ -6,6 +6,7 @@ import Incidents from './pages/Incidents'
 import IncidentDetail from './pages/IncidentDetail'
 import TicketDetail from './pages/TicketDetail'
 import SnsDetail from './pages/SnsDetail'
+import PagerDutyDetail from './pages/PagerDutyDetail'
 import Postmortems from './pages/Postmortems'
 import Notifications from './pages/Notifications'
 
@@ -28,6 +29,7 @@ export default function App() {
           <Route path="incidents/:id" element={<IncidentDetail />} />
           <Route path="tickets/:id" element={<TicketDetail />} />
           <Route path="sns/:id" element={<SnsDetail />} />
+          <Route path="pagerduty/:id" element={<PagerDutyDetail />} />
           <Route path="postmortems" element={<Postmortems />} />
           <Route path="notifications" element={<Notifications />} />
 
