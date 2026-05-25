@@ -41,6 +41,9 @@ export interface Incident {
   ticket_url?: string
   agent_investigation?: string
   remediation_summary?: string
+  // PagerDuty integration
+  pagerduty_id?: string
+  pagerduty_url?: string
 }
 
 export interface Recommendation {
@@ -242,7 +245,10 @@ function mapIncident(raw: any): Incident {
     sla_status: raw.sla_status,
     ticket_url: raw.ticket_url,
     agent_investigation: raw.agent_investigation,
-    remediation_summary: raw.remediation_summary
+    remediation_summary: raw.remediation_summary,
+    // PagerDuty integration
+    pagerduty_id: raw.pagerduty_id,
+    pagerduty_url: raw.pagerduty_url
   }
   
   // Debug: log notifications field

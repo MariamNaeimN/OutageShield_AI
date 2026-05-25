@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { useParams, Link, useLocation, useNavigate } from 'react-router-dom'
 import { ArrowLeft, ExternalLink, FileText, ChevronRight, Home, Zap, Clock, Users, DollarSign, AlertTriangle, CheckCircle, ChevronDown, ChevronUp, Target, TrendingUp, Shield, Activity, Server, BookOpen, Bell, X } from 'lucide-react'
 import { getActiveIncidents, type Incident, type RootCauseEntry } from '../services/api'
@@ -374,6 +375,20 @@ export default function IncidentDetail() {
               </a>
             )}
 
+            {/* PagerDuty Link */}
+            {incident.pagerduty_id && (
+              <a href={incident.pagerduty_url || `https://app.pagerduty.com/incidents?search=${incident.id}`} target="_blank" rel="noreferrer" className="group flex items-center gap-4 p-5 rounded-2xl bg-gray-800/30 border border-gray-700/30 hover:bg-green-950/20 hover:border-green-700/40 transition-all">
+                <div className="w-12 h-12 rounded-xl bg-green-500/15 flex items-center justify-center group-hover:bg-green-500/25 transition-colors">
+                  <Zap className="w-6 h-6 text-green-400" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-white group-hover:text-green-300 transition-colors">{incident.pagerduty_id}</h3>
+                  <p className="text-xs text-gray-500">Open in PagerDuty</p>
+                </div>
+                <ChevronRight className="w-5 h-5 text-gray-600 ml-auto group-hover:text-green-400 group-hover:translate-x-1 transition-all" />
+              </a>
+            )}
+
             {/* SNS Notification Button */}
             {incident.notifications ? (
               <button 
@@ -399,117 +414,6 @@ export default function IncidentDetail() {
               </div>
             )}
           </div>
-
-          {/* SNS Notification Modal */}
-          {showSnsModal && incident.notifications ? (
-            <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" onClick={() => setShowSnsModal(false)}>
-              <div 
-                className="relative w-full max-w-2xl max-h-[80vh] overflow-auto rounded-3xl bg-gray-900 border border-gray-700/50 shadow-2xl"
-                onClick={e => e.stopPropagation()}
-              >
-                {/* Modal Header */}
-                <div className="sticky top-0 z-10 flex items-center justify-between p-6 bg-gray-900/95 backdrop-blur border-b border-gray-700/50">
-                  <div className="flex items-center gap-4">
-                    <div className="w-12 h-12 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center">
-                      <Bell className="w-6 h-6 text-amber-400" />
-                    </div>
-                    <div>
-                      <h2 className="text-lg font-bold text-white">SNS Notification Details</h2>
-                      <p className="text-sm text-gray-400">Alert sent for incident {incident.id}</p>
-                    </div>
-                  </div>
-                  <button 
-                    onClick={() => setShowSnsModal(false)}
-                    className="p-2 rounded-xl hover:bg-gray-800 transition-colors"
-                  >
-                    <X className="w-5 h-5 text-gray-400" />
-                  </button>
-                </div>
-
-                {/* Modal Content */}
-                <div className="p-6 space-y-6">
-                  {(() => {
-                    let notifData: Record<string, unknown> = {}
-                    try {
-                      notifData = typeof incident.notifications === 'string' 
-                        ? JSON.parse(incident.notifications) 
-                        : incident.notifications as Record<string, unknown>
-                    } catch {
-                      notifData = { raw: incident.notifications }
-                    }
-
-                    return (
-                      <>
-                        {/* Notification Info */}
-                        <div className="grid grid-cols-2 gap-4">
-                          <div className="p-4 rounded-xl bg-gray-800/30 border border-gray-700/30">
-                            <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Type</p>
-                            <p className="text-sm font-semibold text-amber-400">{String(notifData.type || 'Alert').replace(/_/g, ' ')}</p>
-                          </div>
-                          <div className="p-4 rounded-xl bg-gray-800/30 border border-gray-700/30">
-                            <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Channel</p>
-                            <p className="text-sm font-semibold text-cyan-400">{String(notifData.channel || 'SNS')}</p>
-                          </div>
-                          <div className="p-4 rounded-xl bg-gray-800/30 border border-gray-700/30">
-                            <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Recipient</p>
-                            <p className="text-sm font-medium text-white">{String(notifData.recipient || 'N/A')}</p>
-                          </div>
-                          <div className="p-4 rounded-xl bg-gray-800/30 border border-gray-700/30">
-                            <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Sent At</p>
-                            <p className="text-sm font-medium text-white">
-                              {notifData.sent_at ? new Date(String(notifData.sent_at)).toLocaleString() : 'N/A'}
-                            </p>
-                          </div>
-                        </div>
-
-                        {/* Subject */}
-                        {notifData.subject ? (
-                          <div className="p-4 rounded-xl bg-gray-800/30 border border-gray-700/30">
-                            <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Subject</p>
-                            <p className="text-sm text-white font-medium">{String(notifData.subject)}</p>
-                          </div>
-                        ) : null}
-
-                        {/* Message Content */}
-                        {notifData.message ? (
-                          <div className="p-4 rounded-xl bg-gray-800/30 border border-gray-700/30">
-                            <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Message Content</p>
-                            <pre className="text-sm text-gray-300 whitespace-pre-wrap font-mono leading-relaxed bg-gray-900/50 p-4 rounded-lg overflow-auto max-h-64">
-                              {String(notifData.message)}
-                            </pre>
-                          </div>
-                        ) : null}
-
-                        {/* Ticket Info */}
-                        {notifData.ticket_id ? (
-                          <div className="flex items-center gap-3 p-4 rounded-xl bg-blue-950/30 border border-blue-800/30">
-                            <ExternalLink className="w-5 h-5 text-blue-400" />
-                            <div>
-                              <p className="text-xs text-gray-500">Linked Ticket</p>
-                              <a 
-                                href={String(notifData.ticket_url || `${JIRA_BASE_URL}/browse/${notifData.ticket_id}`)} 
-                                target="_blank" 
-                                rel="noreferrer"
-                                className="text-sm font-semibold text-blue-400 hover:text-blue-300"
-                              >
-                                {String(notifData.ticket_id)}
-                              </a>
-                            </div>
-                          </div>
-                        ) : null}
-
-                        {/* Status */}
-                        <div className="flex items-center gap-3 p-4 rounded-xl bg-green-950/30 border border-green-800/30">
-                          <CheckCircle className="w-5 h-5 text-green-400" />
-                          <span className="text-sm text-green-400 font-medium">Notification delivered successfully</span>
-                        </div>
-                      </>
-                    )
-                  })()}
-                </div>
-              </div>
-            </div>
-          ) : null}
         </div>
 
         {/* Right Sidebar */}
@@ -597,6 +501,126 @@ export default function IncidentDetail() {
           </Card>
         </div>
       </div>
+
+      {/* SNS Notification Modal - Using Portal to render outside main content */}
+      {showSnsModal && incident.notifications ? createPortal(
+        (() => {
+        console.log('[SNS Modal] Rendering modal via portal');
+        return (
+        <div 
+          className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" 
+          onClick={() => setShowSnsModal(false)}
+        >
+          <div 
+            className="relative w-full max-w-2xl max-h-[80vh] overflow-auto rounded-3xl bg-gray-900 border border-gray-700/50 shadow-2xl"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div className="sticky top-0 z-10 flex items-center justify-between p-6 bg-gray-900/95 backdrop-blur border-b border-gray-700/50">
+              <div className="flex items-center gap-4">
+                <div className="w-12 h-12 rounded-xl bg-amber-500/15 border border-amber-500/30 flex items-center justify-center">
+                  <Bell className="w-6 h-6 text-amber-400" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold text-white">SNS Notification Details</h2>
+                  <p className="text-sm text-gray-400">Alert sent for incident {incident.id}</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setShowSnsModal(false)}
+                className="p-2 rounded-xl hover:bg-gray-800 transition-colors"
+              >
+                <X className="w-5 h-5 text-gray-400" />
+              </button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-6 space-y-6">
+              {(() => {
+                let notifData: Record<string, unknown> = {}
+                try {
+                  notifData = typeof incident.notifications === 'string' 
+                    ? JSON.parse(incident.notifications) 
+                    : incident.notifications as Record<string, unknown>
+                } catch {
+                  notifData = { raw: incident.notifications }
+                }
+
+                return (
+                  <>
+                    {/* Notification Info */}
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="p-4 rounded-xl bg-gray-800/30 border border-gray-700/30">
+                        <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Type</p>
+                        <p className="text-sm font-semibold text-amber-400">{String(notifData.type || 'Alert').replace(/_/g, ' ')}</p>
+                      </div>
+                      <div className="p-4 rounded-xl bg-gray-800/30 border border-gray-700/30">
+                        <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Channel</p>
+                        <p className="text-sm font-semibold text-cyan-400">{String(notifData.channel || 'SNS')}</p>
+                      </div>
+                      <div className="p-4 rounded-xl bg-gray-800/30 border border-gray-700/30">
+                        <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Recipient</p>
+                        <p className="text-sm font-medium text-white">{String(notifData.recipient || 'N/A')}</p>
+                      </div>
+                      <div className="p-4 rounded-xl bg-gray-800/30 border border-gray-700/30">
+                        <p className="text-xs text-gray-500 uppercase tracking-wider mb-1">Sent At</p>
+                        <p className="text-sm font-medium text-white">
+                          {notifData.sent_at ? new Date(String(notifData.sent_at)).toLocaleString() : 'N/A'}
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Subject */}
+                    {notifData.subject ? (
+                      <div className="p-4 rounded-xl bg-gray-800/30 border border-gray-700/30">
+                        <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Subject</p>
+                        <p className="text-sm text-white font-medium">{String(notifData.subject)}</p>
+                      </div>
+                    ) : null}
+
+                    {/* Message Content */}
+                    {notifData.message ? (
+                      <div className="p-4 rounded-xl bg-gray-800/30 border border-gray-700/30">
+                        <p className="text-xs text-gray-500 uppercase tracking-wider mb-2">Message Content</p>
+                        <pre className="text-sm text-gray-300 whitespace-pre-wrap font-mono leading-relaxed bg-gray-900/50 p-4 rounded-lg overflow-auto max-h-64">
+                          {String(notifData.message)}
+                        </pre>
+                      </div>
+                    ) : null}
+
+                    {/* Ticket Info */}
+                    {notifData.ticket_id ? (
+                      <div className="flex items-center gap-3 p-4 rounded-xl bg-blue-950/30 border border-blue-800/30">
+                        <ExternalLink className="w-5 h-5 text-blue-400" />
+                        <div>
+                          <p className="text-xs text-gray-500">Linked Ticket</p>
+                          <a 
+                            href={String(notifData.ticket_url || `${JIRA_BASE_URL}/browse/${notifData.ticket_id}`)} 
+                            target="_blank" 
+                            rel="noreferrer"
+                            className="text-sm font-semibold text-blue-400 hover:text-blue-300"
+                          >
+                            {String(notifData.ticket_id)}
+                          </a>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    {/* Status */}
+                    <div className="flex items-center gap-3 p-4 rounded-xl bg-green-950/30 border border-green-800/30">
+                      <CheckCircle className="w-5 h-5 text-green-400" />
+                      <span className="text-sm text-green-400 font-medium">Notification delivered successfully</span>
+                    </div>
+                  </>
+                )
+              })()}
+            </div>
+          </div>
+        </div>
+        )
+      })(),
+      document.body
+      ) : null}
     </div>
   )
 }

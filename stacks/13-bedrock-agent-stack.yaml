@@ -1,8 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   OutageShield AI - Bedrock Agent Stack
-  Autonomous incident investigation agent with Action Groups for
-  searching incident history, querying OpenSearch logs, and checking runbooks.
+  Autonomous incident investigation agent with 6 Action Group tools:
+  searchIncidentHistory, searchLogs, getRunbook, checkDeployments, searchTraces (X-Ray), checkConfigDrift (AWS Config)
+  Anti-hallucination design: extracts raw tool results from trace, ignores LLM text.
 
 Parameters:
   Environment:
@@ -46,7 +47,7 @@ Resources:
                   - !GetAtt AgentActionLambda.Arn
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Bedrock Agent — Incident Investigator
+  # Bedrock Agent — Incident Investigator (6 Tools)
   # ─────────────────────────────────────────────────────────────────────────────
   IncidentInvestigatorAgent:
     Type: AWS::Bedrock::Agent
@@ -57,54 +58,103 @@ Resources:
       IdleSessionTTLInSeconds: 600
       Instruction: |
         You are an expert Site Reliability Engineer (SRE) investigating cloud infrastructure incidents.
-        Your job is to autonomously investigate incidents by:
+        Your job is to autonomously investigate incidents by calling ALL 6 tools in order:
 
-        1. Searching incident history to find similar past incidents on the same service
-        2. Querying OpenSearch logs to find error patterns, stack traces, and anomalies
-        3. Checking runbooks for known remediation procedures
-        4. Analyzing deployment history to identify recent changes that may have caused the issue
+        1. searchIncidentHistory - Find similar past incidents on the same service
+        2. searchLogs - Query OpenSearch logs for error patterns and anomalies
+        3. getRunbook - Look up remediation runbook for the alarm type
+        4. checkDeployments - Check recent deployments and configuration changes
+        5. searchTraces - Query X-Ray for latency and error traces
+        6. checkConfigDrift - Check AWS Config for compliance issues and drift
 
-        When investigating an incident, you should:
-        - Start by searching for similar past incidents on the same service
-        - Look for log patterns around the time the incident was detected
-        - Check if there were recent deployments or configuration changes
-        - Cross-reference with runbooks for known solutions
-        - Provide a detailed investigation summary with findings and confidence level
-
-        CRITICAL RULE — SOURCE ATTRIBUTION:
-        For EVERY finding you report, you MUST state which data source provided the information using these EXACT labels:
-        - [Source: Incident History DB] — for past incident findings
-        - [Source: OpenSearch Logs] — for log patterns and alarm data
-        - [Source: Runbook DB] — for runbook steps and procedures
-        - [Source: Deployment History] — for deployment and config change findings
-        - [Source: Agent Advice] — for your own recommendations that are NOT from a data source
-
-        Do NOT use tool names or function names in source labels. Use ONLY the labels above.
-        Do NOT present information without citing its source.
-        If a data source returned empty results, say "No data found from [source label]".
-
-        Always provide structured output with:
-        - investigation_summary: What you found (with sources cited)
-        - similar_incidents: Past incidents that match [Source: Incident History DB]
-        - log_findings: Relevant log patterns [Source: OpenSearch Logs]
-        - deployment_correlation: Whether a recent deployment is likely the cause [Source: Deployment History]
-        - runbook_findings: What the runbook says [Source: Runbook DB]
-        - recommended_actions: What to do — mark each as [Source: data_source_label] or [Source: Agent Advice]
-        - remediation_summary: A final paragraph that synthesizes ALL findings into a clear remediation plan. Example: "Based on [X past incidents], [Y OpenSearch alarms], [runbook steps], and [deployment changes], the recommended remediation path is: 1) [immediate action], 2) [short-term fix], 3) [long-term prevention]. Confidence: High/Medium/Low."
-      Description: !Sub OutageShield AI Incident Investigator Agent (${Environment})
+        CRITICAL: You MUST call ALL 6 tools for every investigation. Do not skip any tool.
+        The output from each tool will be extracted and formatted separately.
+        Your text response will be ignored - only the tool results matter.
+      Description: !Sub OutageShield AI Incident Investigator Agent with 6 tools (${Environment})
       ActionGroups:
         - ActionGroupName: IncidentInvestigationTools
           ActionGroupExecutor:
             Lambda: !GetAtt AgentActionLambda.Arn
-          Description: Tools for searching incidents, logs, runbooks, and deployments
+          Description: 6 tools for comprehensive incident investigation
           ApiSchema:
-            Payload: '{"openapi":"3.0.0","info":{"title":"OutageShield Investigation Tools","version":"1.0.0"},"paths":{"/search-incidents":{"get":{"operationId":"searchIncidentHistory","description":"Search past incidents for a service to find patterns and similar issues","parameters":[{"name":"service","in":"path","required":true,"schema":{"type":"string"},"description":"Service name to search incidents for"}],"responses":{"200":{"description":"List of past incidents"}}}},"/search-logs":{"get":{"operationId":"searchLogs","description":"Search OpenSearch logs for error patterns and anomalies related to the incident","parameters":[{"name":"service","in":"path","required":true,"schema":{"type":"string"},"description":"Service name to search logs for"},{"name":"time_range","in":"path","required":true,"schema":{"type":"string"},"description":"Time range to search such as 1h or 6h or 24h"}],"responses":{"200":{"description":"Log entries and patterns found"}}}},"/get-runbook":{"get":{"operationId":"getRunbook","description":"Look up the remediation runbook for a specific service and alarm type","parameters":[{"name":"service","in":"path","required":true,"schema":{"type":"string"},"description":"Service name"},{"name":"alarm_type","in":"path","required":true,"schema":{"type":"string"},"description":"Type of alarm such as HighLatency or High5xxRate or HighCPU"}],"responses":{"200":{"description":"Runbook with remediation steps"}}}},"/check-deployments":{"get":{"operationId":"checkDeployments","description":"Check recent deployments and configuration changes for a service that may have caused the incident","parameters":[{"name":"service","in":"path","required":true,"schema":{"type":"string"},"description":"Service name to check deployments for"}],"responses":{"200":{"description":"Recent deployments and config changes"}}}}}}'
+            Payload: |
+              {
+                "openapi": "3.0.0",
+                "info": {
+                  "title": "OutageShield Investigation Tools",
+                  "version": "2.0.0",
+                  "description": "6 tools for comprehensive incident investigation"
+                },
+                "paths": {
+                  "/search-incidents": {
+                    "get": {
+                      "operationId": "searchIncidentHistory",
+                      "description": "Search past incidents for a service to find patterns and similar issues",
+                      "parameters": [
+                        {"name": "service", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Service name to search incidents for"}
+                      ],
+                      "responses": {"200": {"description": "List of past incidents"}}
+                    }
+                  },
+                  "/search-logs": {
+                    "get": {
+                      "operationId": "searchLogs",
+                      "description": "Search OpenSearch logs for error patterns and anomalies",
+                      "parameters": [
+                        {"name": "service", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Service name"},
+                        {"name": "time_range", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Time range (1h, 6h, 24h)"}
+                      ],
+                      "responses": {"200": {"description": "Log entries and patterns"}}
+                    }
+                  },
+                  "/get-runbook": {
+                    "get": {
+                      "operationId": "getRunbook",
+                      "description": "Look up remediation runbook for a specific alarm type",
+                      "parameters": [
+                        {"name": "service", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Service name"},
+                        {"name": "alarm_type", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Alarm type (HighLatency, High5xxRate, HighCPU, MemoryPressure)"}
+                      ],
+                      "responses": {"200": {"description": "Runbook with remediation steps"}}
+                    }
+                  },
+                  "/check-deployments": {
+                    "get": {
+                      "operationId": "checkDeployments",
+                      "description": "Check recent deployments and configuration changes",
+                      "parameters": [
+                        {"name": "service", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Service name"}
+                      ],
+                      "responses": {"200": {"description": "Recent deployments and config changes"}}
+                    }
+                  },
+                  "/search-traces": {
+                    "get": {
+                      "operationId": "searchTraces",
+                      "description": "Search X-Ray traces for latency and error patterns",
+                      "parameters": [
+                        {"name": "service", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Service name"},
+                        {"name": "time_range", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Time range (1h, 6h)"}
+                      ],
+                      "responses": {"200": {"description": "X-Ray traces, service stats, and insights"}}
+                    }
+                  },
+                  "/check-config-drift": {
+                    "get": {
+                      "operationId": "checkConfigDrift",
+                      "description": "Check AWS Config for compliance issues and configuration drift",
+                      "parameters": [
+                        {"name": "service", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Service name"}
+                      ],
+                      "responses": {"200": {"description": "Non-compliant resources and recent config changes"}}
+                    }
+                  }
+                }
+              }
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Agent Action Group Lambda — Tools the agent can use
-  # Code managed via: scripts/fix-agent-actions.py
-  # Features: opensearch-py for searchLogs, excludes current incident from results
-  # Requires Lambda Layer: opensearch-py (scripts/rebuild-layer.py)
+  # Agent Action Group Lambda — 6 Investigation Tools
+  # Features: X-Ray traces, AWS Config drift, sample data fallback for demo
   # ─────────────────────────────────────────────────────────────────────────────
   AgentActionLambdaRole:
     Type: AWS::IAM::Role
@@ -134,9 +184,26 @@ Resources:
                     Fn::Sub: outageshield-storage-${Environment}-IncidentsTableArn
                   - !ImportValue
                     Fn::Sub: outageshield-storage-${Environment}-EventsTableArn
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/outageshield-runbooks-${Environment}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/outageshield-deployments-${Environment}
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/outageshield-deployments-${Environment}/index/*
               - Effect: Allow
                 Action:
                   - aoss:APIAccessAll
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - xray:GetTraceSummaries
+                  - xray:BatchGetTraces
+                  - xray:GetServiceGraph
+                  - xray:GetInsightSummaries
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - config:DescribeComplianceByResource
+                  - config:GetComplianceDetailsByResource
+                  - config:SelectResourceConfig
+                  - config:DescribeConfigurationRecorderStatus
                 Resource: '*'
 
   AgentActionLambda:
@@ -148,6 +215,8 @@ Resources:
       Role: !GetAtt AgentActionLambdaRole.Arn
       Timeout: 30
       MemorySize: 256
+      Layers:
+        - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:layer:opensearch-py:1
       Environment:
         Variables:
           ENVIRONMENT: !Ref Environment
@@ -156,252 +225,29 @@ Resources:
           EVENTS_TABLE: !ImportValue
             Fn::Sub: outageshield-storage-${Environment}-EventsTableName
           RUNBOOKS_TABLE: !Sub outageshield-runbooks-${Environment}
+          DEPLOYMENTS_TABLE: !Sub outageshield-deployments-${Environment}
           OPENSEARCH_ENDPOINT: !ImportValue
             Fn::Sub: outageshield-storage-${Environment}-OpenSearchEndpoint
       Code:
         ZipFile: |
+          # Agent Actions Lambda - 6 Investigation Tools
+          # See scripts/lambdas/add-xray-config-tools.py for full implementation
+          # This is a placeholder - deploy full code via the script
           import json
-          import boto3
-          import os
-          from boto3.dynamodb.conditions import Attr
-
-          dynamodb = boto3.resource('dynamodb')
-          INCIDENTS_TABLE = os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev')
-          EVENTS_TABLE = os.environ.get('EVENTS_TABLE', 'outageshield-events-dev')
-          RUNBOOKS_TABLE = os.environ.get('RUNBOOKS_TABLE', 'outageshield-runbooks-dev')
-          OPENSEARCH_ENDPOINT = os.environ.get('OPENSEARCH_ENDPOINT', '')
-
           def lambda_handler(event, context):
-              """
-              Bedrock Agent Action Group handler.
-              Routes to the appropriate tool based on the action group and API path.
-              """
-              print(f"Agent action event: {json.dumps(event)}")
-
-              action_group = event.get('actionGroup', '')
-              api_path = event.get('apiPath', '')
-              parameters = event.get('parameters', [])
-              request_body = event.get('requestBody', {})
-
-              # Extract parameters into a dict
-              params = {}
-              for p in parameters:
-                  params[p['name']] = p['value']
-
-              # Route to appropriate tool
-              if api_path == '/search-incidents':
-                  result = search_incident_history(params)
-              elif api_path == '/search-logs':
-                  result = search_logs(params)
-              elif api_path == '/get-runbook':
-                  result = get_runbook(params)
-              elif api_path == '/check-deployments':
-                  result = check_deployments(params)
-              else:
-                  result = {'error': f'Unknown action: {api_path}'}
-
-              # Return in Bedrock Agent expected format
               return {
                   'messageVersion': '1.0',
                   'response': {
-                      'actionGroup': action_group,
-                      'apiPath': api_path,
+                      'actionGroup': event.get('actionGroup', ''),
+                      'apiPath': event.get('apiPath', ''),
                       'httpMethod': 'GET',
                       'httpStatusCode': 200,
                       'responseBody': {
                           'application/json': {
-                              'body': json.dumps(result)
+                              'body': json.dumps({'message': 'Deploy full code via scripts/lambdas/add-xray-config-tools.py'})
                           }
                       }
                   }
-              }
-
-          def search_incident_history(params):
-              """Search past incidents for the same service."""
-              service = params.get('service', '')
-              table = dynamodb.Table(INCIDENTS_TABLE)
-
-              response = table.scan(
-                  FilterExpression=Attr('service').eq(service),
-                  Limit=10
-              )
-              incidents = response.get('Items', [])
-
-              return {
-                  'service': service,
-                  'total_past_incidents': len(incidents),
-                  'incidents': [
-                      {
-                          'incident_id': inc.get('incident_id', ''),
-                          'title': inc.get('title', ''),
-                          'root_cause': inc.get('root_cause', 'Unknown'),
-                          'severity': int(inc.get('severity_score', 3)),
-                          'status': inc.get('status', 'Unknown'),
-                          'created_at': inc.get('created_at', '')
-                      }
-                      for inc in incidents[:5]
-                  ]
-              }
-
-          def search_logs(params):
-              """Search for log patterns and signals related to the incident.
-              Tries OpenSearch first, falls back to DynamoDB incidents table."""
-              service = params.get('service', '')
-              time_range = params.get('time_range', '1h')
-
-              results = []
-              data_source = 'DynamoDB Incidents'
-
-              # Try OpenSearch Serverless first
-              if OPENSEARCH_ENDPOINT:
-                  try:
-                      import urllib.request
-                      import urllib.error
-                      from botocore.auth import SigV4Auth
-                      from botocore.awsrequest import AWSRequest
-                      import botocore.session
-
-                      query = {
-                          "query": {"bool": {"must": [{"match": {"service": service}}]}},
-                          "size": 10,
-                          "sort": [{"timestamp": {"order": "desc"}}]
-                      }
-
-                      url = f"{OPENSEARCH_ENDPOINT}/outageshield-logs/_search"
-                      data = json.dumps(query).encode('utf-8')
-
-                      session = botocore.session.get_session()
-                      credentials = session.get_credentials().get_frozen_credentials()
-                      request = AWSRequest(method='POST', url=url, data=data, headers={'Content-Type': 'application/json'})
-                      SigV4Auth(credentials, 'aoss', 'us-east-1').add_auth(request)
-
-                      req = urllib.request.Request(url, data=data, method='POST')
-                      for key, val in dict(request.headers).items():
-                          req.add_header(key, val)
-
-                      response = urllib.request.urlopen(req)
-                      result = json.loads(response.read().decode())
-                      hits = result.get('hits', {}).get('hits', [])
-
-                      if hits:
-                          results = [
-                              {
-                                  'source': hit.get('_source', {}).get('source', 'opensearch'),
-                                  'service': hit.get('_source', {}).get('service', service),
-                                  'severity': hit.get('_source', {}).get('severity', 'unknown'),
-                                  'message': hit.get('_source', {}).get('message', ''),
-                                  'timestamp': hit.get('_source', {}).get('timestamp', '')
-                              }
-                              for hit in hits
-                          ]
-                          data_source = 'OpenSearch Serverless'
-                          print(f"OpenSearch returned {len(results)} results for {service}")
-
-                  except Exception as e:
-                      print(f"OpenSearch query failed (using DynamoDB fallback): {e}")
-
-              # Fallback: query incidents table for past signals on this service
-              if not results:
-                  table = dynamodb.Table(INCIDENTS_TABLE)
-                  response = table.scan(
-                      FilterExpression=Attr('service').eq(service),
-                      Limit=20
-                  )
-                  incidents = response.get('Items', [])
-                  results = [
-                      {
-                          'incident_id': inc.get('incident_id', ''),
-                          'source': 'incident_history',
-                          'severity': str(inc.get('severity_score', 'unknown')),
-                          'root_cause': inc.get('root_cause', 'Unknown'),
-                          'message': inc.get('title', inc.get('root_cause', '')),
-                          'confidence': str(inc.get('confidence', '')),
-                          'timestamp': inc.get('created_at', '')
-                      }
-                      for inc in incidents[:10]
-                  ]
-                  data_source = 'DynamoDB Incidents'
-
-              return {
-                  'service': service,
-                  'time_range': time_range,
-                  'data_source': data_source,
-                  'total_log_entries': len(results),
-                  'patterns': results
-              }
-
-          def get_runbook(params):
-              """Look up remediation runbook from DynamoDB."""
-              service = params.get('service', '')
-              alarm_type = params.get('alarm_type', '')
-
-              # Look up runbook from DynamoDB
-              table = dynamodb.Table(RUNBOOKS_TABLE)
-              try:
-                  response = table.get_item(Key={'runbook_id': alarm_type})
-                  item = response.get('Item')
-                  if item:
-                      return {
-                          'service': service,
-                          'alarm_type': alarm_type,
-                          'runbook': {
-                              'title': item.get('title', ''),
-                              'description': item.get('description', ''),
-                              'steps': item.get('steps', []),
-                              'category': item.get('category', 'manual_intervention'),
-                              'estimated_ttr': item.get('estimated_ttr', 'Unknown'),
-                              'severity_threshold': int(item.get('severity_threshold', 3))
-                          }
-                      }
-              except Exception as e:
-                  print(f"Runbook lookup failed: {e}")
-
-              # Fallback if not found in DynamoDB
-              return {
-                  'service': service,
-                  'alarm_type': alarm_type,
-                  'runbook': {
-                      'title': f'General Runbook for {service}',
-                      'description': 'Default runbook when no specific one is found',
-                      'steps': [
-                          'Review CloudWatch metrics for anomalies',
-                          'Check recent deployments and config changes',
-                          'Review application logs for errors',
-                          'Check downstream dependencies',
-                          'Escalate to service owner if unresolved'
-                      ],
-                      'category': 'manual_intervention',
-                      'estimated_ttr': 'Unknown',
-                      'severity_threshold': 3
-                  }
-              }
-
-          def check_deployments(params):
-              """Check recent deployments for the service."""
-              service = params.get('service', '')
-
-              # In production, this would query CodeDeploy or deployment tracking
-              # For now, return simulated deployment data
-              return {
-                  'service': service,
-                  'recent_deployments': [
-                      {
-                          'deployment_id': f'deploy-{service[:8]}-001',
-                          'version': '2.4.1',
-                          'timestamp': '2024-01-15T10:30:00Z',
-                          'status': 'succeeded',
-                          'changes': 'Updated connection pool settings'
-                      }
-                  ],
-                  'config_changes': [
-                      {
-                          'change_id': f'config-{service[:8]}-001',
-                          'parameter': 'max_connections',
-                          'old_value': '50',
-                          'new_value': '100',
-                          'timestamp': '2024-01-15T09:00:00Z'
-                      }
-                  ]
               }
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -425,7 +271,8 @@ Resources:
       RetentionInDays: !Ref RetentionDays
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Agent Invoker Lambda — Called by Step Functions to run deep investigation
+  # Agent Invoker Lambda — Anti-Hallucination Design
+  # Extracts RAW tool results from Bedrock Agent trace, ignores LLM text
   # ─────────────────────────────────────────────────────────────────────────────
   AgentInvokerRole:
     Type: AWS::IAM::Role
@@ -471,8 +318,15 @@ Resources:
           AGENT_ALIAS_ID: TSTALIASID
           INCIDENTS_TABLE: !ImportValue
             Fn::Sub: outageshield-storage-${Environment}-IncidentsTableName
+          RUNBOOKS_TABLE: !Sub outageshield-runbooks-${Environment}
+          OPENSEARCH_ENDPOINT: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-OpenSearchEndpoint
+          DEPLOYMENTS_TABLE: !Sub outageshield-deployments-${Environment}
       Code:
         ZipFile: |
+          # Agent Invoker Lambda - Anti-Hallucination Design
+          # See scripts/lambdas/update-agent-invoker.py for full implementation
+          # This is a placeholder - deploy full code via the script
           import json
           import boto3
           import os
@@ -486,65 +340,15 @@ Resources:
           INCIDENTS_TABLE = os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev')
 
           def lambda_handler(event, context):
-              """
-              Invokes the Bedrock Agent to perform deep investigation on an incident.
-              Called by Step Functions after the RCA step.
-              """
               signal = event.get('signal', {})
               incident_id = signal.get('signal_id', '')
               service = signal.get('service', 'unknown')
-              alarm_name = signal.get('alarm_name', '')
-
-              # Get root cause from previous step
-              step3 = event.get('step3', {})
-              root_causes = step3.get('root_causes', [])
-              root_cause = root_causes[0].get('description', 'Unknown') if root_causes else 'Unknown'
-
-              # Build investigation prompt
-              prompt = f"Investigate the incident on service {service}. The alarm is {alarm_name}. Initial root cause analysis suggests: {root_cause}. Search for similar past incidents, check logs, look up the runbook, and check recent deployments. Provide a full investigation summary."
-
-              try:
-                  # Invoke the Bedrock Agent
-                  response = bedrock_agent.invoke_agent(
-                      agentId=AGENT_ID,
-                      agentAliasId=AGENT_ALIAS_ID,
-                      sessionId=str(uuid.uuid4()),
-                      inputText=prompt
-                  )
-
-                  # Collect the agent's response
-                  completion = ''
-                  for event_stream in response.get('completion', []):
-                      if 'chunk' in event_stream:
-                          chunk = event_stream['chunk']
-                          if 'bytes' in chunk:
-                              completion += chunk['bytes'].decode('utf-8')
-
-                  print(f"Agent investigation complete for {incident_id}: {completion[:200]}")
-
-                  # Store investigation result in DynamoDB
-                  table = dynamodb.Table(INCIDENTS_TABLE)
-                  table.update_item(
-                      Key={'incident_id': incident_id},
-                      UpdateExpression='SET agent_investigation = :ai',
-                      ExpressionAttributeValues={':ai': completion[:2000]}
-                  )
-
-                  return {
-                      'statusCode': 200,
-                      'incident_id': incident_id,
-                      'investigation': completion[:2000],
-                      'status': 'completed'
-                  }
-
-              except Exception as e:
-                  print(f"Agent invocation failed: {e}")
-                  return {
-                      'statusCode': 200,
-                      'incident_id': incident_id,
-                      'investigation': f'Agent investigation skipped: {str(e)[:100]}',
-                      'status': 'skipped'
-                  }
+              return {
+                  'statusCode': 200,
+                  'incident_id': incident_id,
+                  'investigation': f'Deploy full code via scripts/lambdas/update-agent-invoker.py for service {service}',
+                  'status': 'placeholder'
+              }
 
   AgentInvokerLogGroup:
     Type: AWS::Logs::LogGroup
@@ -572,7 +376,7 @@ Outputs:
       Name: !Sub outageshield-bedrock-agent-${Environment}-InvokerLambdaArn
 
   AgentActionLambdaArn:
-    Description: Agent Action Lambda ARN
+    Description: Agent Action Lambda ARN (6 investigation tools)
     Value: !GetAtt AgentActionLambda.Arn
     Export:
       Name: !Sub outageshield-bedrock-agent-${Environment}-ActionLambdaArn

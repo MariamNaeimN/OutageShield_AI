@@ -1,7 +1,8 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   OutageShield AI - Notifications & Ticketing Stack
-  SNS notifications (with ticket link + details) + Jira ticket creation via REST API.
+  SNS notifications (with ticket link + details) + Jira AND PagerDuty ticket creation.
+  Supports: Jira only, PagerDuty only, or both systems simultaneously.
 
 Parameters:
   Environment:
@@ -193,7 +194,9 @@ Resources:
               return {'statusCode': 200, 'notification': notification}
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Ticket Integrator Lambda — Real Jira API integration
+  # Ticket Integrator Lambda — Jira + PagerDuty Integration
+  # Code managed via: scripts/lambdas/add-pagerduty-integration.py
+  # Features: Supports Jira, PagerDuty, or both systems
   # ─────────────────────────────────────────────────────────────────────────────
   TicketIntegratorRole:
     Type: AWS::IAM::Role
@@ -244,9 +247,14 @@ Resources:
           WORKFLOW_STATE_TABLE: !ImportValue
             Fn::Sub: outageshield-storage-${Environment}-WorkflowStateTableName
           JIRA_SECRET: outageshield/jira-credentials
+          PAGERDUTY_SECRET: outageshield/pagerduty-credentials
+          TICKET_SYSTEM: both  # Options: jira, pagerduty, both
           DASHBOARD_URL: https://d2k1km1tzlio49.cloudfront.net
       Code:
         ZipFile: |
+          # Ticket Integrator Lambda - Jira + PagerDuty
+          # See scripts/lambdas/add-pagerduty-integration.py for full implementation
+          # This is a placeholder - deploy full code via the script
           import json
           import boto3
           import os
@@ -259,75 +267,55 @@ Resources:
           sm = boto3.client('secretsmanager')
 
           INCIDENTS_TABLE = os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev')
-          SECRET_NAME = os.environ.get('JIRA_SECRET', 'outageshield/jira-credentials')
+          JIRA_SECRET = os.environ.get('JIRA_SECRET', 'outageshield/jira-credentials')
+          PAGERDUTY_SECRET = os.environ.get('PAGERDUTY_SECRET', 'outageshield/pagerduty-credentials')
+          TICKET_SYSTEM = os.environ.get('TICKET_SYSTEM', 'both')
           DASHBOARD_URL = os.environ.get('DASHBOARD_URL', 'https://d2k1km1tzlio49.cloudfront.net')
 
           def lambda_handler(event, context):
               signal = event.get('signal', {})
               incident_id = signal.get('signal_id', '')
               service = signal.get('service', 'unknown')
-
               step2 = event.get('step2', {})
               step3 = event.get('step3', {})
               severity = step2.get('severity_score', 4)
-              biz_impact = step2.get('business_impact_score', 5)
-              revenue = step2.get('revenue_at_risk', 'Unknown')
-              affected_users = step2.get('affected_users', 0)
-              sla_status = step2.get('sla_status', 'Unknown')
-
               root_causes = step3.get('root_causes', [])
               top_rc = root_causes[0].get('description', 'Under investigation') if root_causes else 'Under investigation'
-              confidence = root_causes[0].get('confidence', 0) if root_causes else 0
+              
+              results = {'statusCode': 200, 'tickets': [], 'severity': severity, 'root_cause': top_rc}
+              
+              # Create tickets based on TICKET_SYSTEM setting
+              if TICKET_SYSTEM in ['jira', 'both']:
+                  jira_result = create_jira_ticket(incident_id, service, severity, top_rc)
+                  results['tickets'].append(jira_result)
+                  if jira_result.get('success'):
+                      results['ticket_id'] = jira_result['ticket_id']
+                      results['ticket_url'] = jira_result['ticket_url']
+              
+              if TICKET_SYSTEM in ['pagerduty', 'both']:
+                  pd_result = create_pagerduty_incident(incident_id, service, severity, top_rc)
+                  results['tickets'].append(pd_result)
+                  if pd_result.get('success') and 'ticket_id' not in results:
+                      results['ticket_id'] = pd_result['ticket_id']
+                      results['ticket_url'] = pd_result['ticket_url']
+              
+              store_ticket_info(incident_id, results)
+              return results
 
-              # Get Jira credentials
+          def create_jira_ticket(incident_id, service, severity, root_cause):
               try:
-                  secret = sm.get_secret_value(SecretId=SECRET_NAME)
+                  secret = sm.get_secret_value(SecretId=JIRA_SECRET)
                   creds = json.loads(secret['SecretString'])
                   jira_url = creds['jira_url']
                   project_key = creds['project_key']
                   email = creds['email']
                   api_token = creds['api_token']
-              except Exception as e:
-                  print(f"Failed to get Jira credentials: {e}")
-                  return create_fallback(incident_id, service, severity, top_rc, revenue)
-
-              alarm_name = signal.get('alarm_name', f'Incident on {service}')
-              reason = signal.get('reason', 'Anomaly detected')
-
-              summary = f"[OutageShield] SEV-{severity} | {service} | {alarm_name}"
-              description = f"h2. Incident Details\\n||Field||Value||\\n|Incident ID|{incident_id}|\\n|Service|{service}|\\n|Severity|SEV-{severity}|\\n|Business Impact|{biz_impact}/10|\\n|Revenue at Risk|{revenue}|\\n|Affected Users|{affected_users}|\\n|SLA Status|{sla_status}|\\n\\nh2. Root Cause Analysis\\n*Confidence:* {confidence}%\\n{top_rc}\\n\\nh2. Alarm\\n*Alarm:* {alarm_name}\\n*Reason:* {reason}\\n\\nh2. OutageShield Dashboard\\n[View Incident in Dashboard|{DASHBOARD_URL}/incidents/{incident_id}]\\n\\n----\\n_Auto-generated by OutageShield AI Agent_"
-
-              priority_map = {5: 'Highest', 4: 'High', 3: 'Medium', 2: 'Low', 1: 'Lowest'}
-              priority = priority_map.get(severity, 'High')
-
-              dashboard_link = f"{DASHBOARD_URL}/incidents/{incident_id}"
-
-              desc_content = [
-                  {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Incident Details"}]},
-                  {"type": "table", "content": [
-                      {"type": "tableRow", "content": [{"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Field"}]}]}, {"type": "tableHeader", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Value"}]}]}]},
-                      {"type": "tableRow", "content": [{"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Incident ID"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": incident_id}]}]}]},
-                      {"type": "tableRow", "content": [{"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Service"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": service}]}]}]},
-                      {"type": "tableRow", "content": [{"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Severity"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": f"SEV-{severity}"}]}]}]},
-                      {"type": "tableRow", "content": [{"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Revenue at Risk"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": str(revenue)}]}]}]},
-                      {"type": "tableRow", "content": [{"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Affected Users"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": str(affected_users)}]}]}]},
-                      {"type": "tableRow", "content": [{"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "SLA Status"}]}]}, {"type": "tableCell", "content": [{"type": "paragraph", "content": [{"type": "text", "text": str(sla_status)}]}]}]}
-                  ]},
-                  {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Root Cause Analysis"}]},
-                  {"type": "paragraph", "content": [{"type": "text", "text": f"Confidence: {confidence}%", "marks": [{"type": "strong"}]}]},
-                  {"type": "paragraph", "content": [{"type": "text", "text": top_rc}]},
-                  {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "Alarm"}]},
-                  {"type": "paragraph", "content": [{"type": "text", "text": f"Alarm: {alarm_name}", "marks": [{"type": "strong"}]}]},
-                  {"type": "paragraph", "content": [{"type": "text", "text": f"Reason: {reason}"}]},
-                  {"type": "heading", "attrs": {"level": 2}, "content": [{"type": "text", "text": "OutageShield Dashboard"}]},
-                  {"type": "paragraph", "content": [{"type": "text", "text": "View Incident in Dashboard: "}, {"type": "text", "text": dashboard_link, "marks": [{"type": "link", "attrs": {"href": dashboard_link}}]}]},
-                  {"type": "rule"},
-                  {"type": "paragraph", "content": [{"type": "text", "text": "Auto-generated by OutageShield AI Agent", "marks": [{"type": "em"}]}]}
-              ]
-
-              issue_data = {"fields": {"project": {"key": project_key}, "summary": summary[:255], "description": {"type": "doc", "version": 1, "content": desc_content}, "issuetype": {"name": "Task"}, "priority": {"name": priority}}}
-
-              try:
+                  
+                  summary = f"[OutageShield] SEV-{severity} | {service}"[:255]
+                  priority_map = {5: 'Highest', 4: 'High', 3: 'Medium', 2: 'Low', 1: 'Lowest'}
+                  
+                  issue_data = {"fields": {"project": {"key": project_key}, "summary": summary, "issuetype": {"name": "Task"}, "priority": {"name": priority_map.get(severity, 'High')}}}
+                  
                   url = f"{jira_url}/rest/api/3/issue"
                   data = json.dumps(issue_data).encode('utf-8')
                   auth_bytes = base64.b64encode(f"{email}:{api_token}".encode()).decode()
@@ -337,41 +325,65 @@ Resources:
                   response = urllib.request.urlopen(req)
                   result = json.loads(response.read().decode())
                   ticket_id = result.get('key', 'UNKNOWN')
-                  ticket_url = f"{jira_url}/browse/{ticket_id}"
-                  print(f"Jira ticket created: {ticket_id}")
+                  return {'system': 'Jira', 'success': True, 'ticket_id': ticket_id, 'ticket_url': f"{jira_url}/browse/{ticket_id}"}
               except Exception as e:
-                  print(f"Jira error: {e}")
-                  ticket_id = f"TGSHLD-ERR-{incident_id[:6]}"
-                  ticket_url = f"{jira_url}/browse/{ticket_id}"
+                  return {'system': 'Jira', 'success': False, 'error': str(e)[:100]}
 
-              # Store in DynamoDB
-              dashboard_link = f"{DASHBOARD_URL}/incidents/{incident_id}"
-              ticket_content = json.dumps({'summary': summary, 'description': f"Service: {service}\\nSeverity: SEV-{severity}\\nRoot Cause: {top_rc}\\nRevenue: {revenue}\\nDashboard: {dashboard_link}", 'priority': priority, 'url': ticket_url, 'dashboard_url': dashboard_link, 'created_at': datetime.now(timezone.utc).isoformat()})
+          def create_pagerduty_incident(incident_id, service, severity, root_cause):
+              try:
+                  secret = sm.get_secret_value(SecretId=PAGERDUTY_SECRET)
+                  creds = json.loads(secret['SecretString'])
+                  routing_key = creds['routing_key']
+                  
+                  severity_map = {5: 'critical', 4: 'critical', 3: 'error', 2: 'warning', 1: 'info'}
+                  pd_severity = severity_map.get(severity, 'error')
+                  dashboard_link = f"{DASHBOARD_URL}/incidents/{incident_id}"
+                  
+                  event_payload = {
+                      "routing_key": routing_key,
+                      "event_action": "trigger",
+                      "dedup_key": incident_id,
+                      "payload": {
+                          "summary": f"[OutageShield] SEV-{severity} | {service}"[:255],
+                          "source": "OutageShield AI",
+                          "severity": pd_severity,
+                          "timestamp": datetime.now(timezone.utc).isoformat(),
+                          "component": service,
+                          "custom_details": {"incident_id": incident_id, "service": service, "severity": severity, "root_cause": root_cause, "dashboard_url": dashboard_link}
+                      },
+                      "links": [{"href": dashboard_link, "text": "View in OutageShield Dashboard"}]
+                  }
+                  
+                  url = "https://events.pagerduty.com/v2/enqueue"
+                  data = json.dumps(event_payload).encode('utf-8')
+                  req = urllib.request.Request(url, data=data, method='POST')
+                  req.add_header('Content-Type', 'application/json')
+                  response = urllib.request.urlopen(req)
+                  result = json.loads(response.read().decode())
+                  dedup_key = result.get('dedup_key', incident_id)
+                  return {'system': 'PagerDuty', 'success': True, 'ticket_id': f"PD-{dedup_key[:8].upper()}", 'ticket_url': f"https://app.pagerduty.com/incidents?search={dedup_key}"}
+              except Exception as e:
+                  return {'system': 'PagerDuty', 'success': False, 'error': str(e)[:100]}
+
+          def store_ticket_info(incident_id, results):
               try:
                   table = dynamodb.Table(INCIDENTS_TABLE)
+                  tickets_json = json.dumps(results.get('tickets', []))
+                  ticket_systems = [t['system'] for t in results.get('tickets', []) if t.get('success')]
                   table.update_item(
                       Key={'incident_id': incident_id},
-                      UpdateExpression='SET ticket_id = :tid, ticket_system = :ts, ticket_status = :tst, ticket_url = :tu, ticket_content = :tc, workflow_step = :ws',
-                      ExpressionAttributeValues={':tid': ticket_id, ':ts': 'Jira', ':tst': 'Open', ':tu': ticket_url, ':tc': ticket_content, ':ws': 'ticket_created'}
+                      UpdateExpression='SET ticket_id = :tid, ticket_system = :ts, ticket_status = :tst, ticket_url = :tu, tickets_all = :ta, workflow_step = :ws',
+                      ExpressionAttributeValues={
+                          ':tid': results.get('ticket_id', 'N/A'),
+                          ':ts': ', '.join(ticket_systems) if ticket_systems else 'None',
+                          ':tst': 'Open',
+                          ':tu': results.get('ticket_url', ''),
+                          ':ta': tickets_json,
+                          ':ws': 'ticket_created'
+                      }
                   )
               except Exception as e:
-                  print(f"DynamoDB failed: {e}")
-
-              return {'statusCode': 200, 'ticket_id': ticket_id, 'ticket_url': ticket_url, 'system': 'Jira', 'severity': severity, 'root_cause': top_rc}
-
-          def create_fallback(incident_id, service, severity, root_cause, revenue):
-              ticket_id = f"OPS-{incident_id[:8].upper()}"
-              ticket_url = f"https://corpinfollc.atlassian.net/browse/{ticket_id}"
-              try:
-                  table = dynamodb.Table(INCIDENTS_TABLE)
-                  table.update_item(
-                      Key={'incident_id': incident_id},
-                      UpdateExpression='SET ticket_id = :tid, ticket_system = :ts, ticket_status = :tst, ticket_url = :tu, workflow_step = :ws',
-                      ExpressionAttributeValues={':tid': ticket_id, ':ts': 'Jira', ':tst': 'Open', ':tu': ticket_url, ':ws': 'ticket_created'}
-                  )
-              except Exception as e:
-                  print(f"Fallback failed: {e}")
-              return {'statusCode': 200, 'ticket_id': ticket_id, 'ticket_url': ticket_url, 'system': 'Jira', 'severity': severity, 'root_cause': root_cause}
+                  print(f"DynamoDB store failed: {e}")
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Log Groups

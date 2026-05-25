@@ -69,124 +69,312 @@ def lambda_handler(event, context):
 
 
 def generate_ai_recommendations(sources, root_causes, service, alarm_name):
-    """Use Bedrock AI to generate smart, evidence-based recommendations."""
+    """Generate recommendations using PURE RULE-BASED LOGIC - NO AI, NO HALLUCINATION.
+    Each recommendation is directly derived from the tool output data."""
     
-    # Build evidence sections - only include sources with actual data
-    evidence_sections = []
-    available_sources = []
+    recommendations = []
     
-    if sources.get('opensearch') and not is_no_data(sources['opensearch']):
-        evidence_sections.append(f"LOG ANALYSIS (OpenSearch):\n{sources['opensearch']}")
-        available_sources.append('AGENT:log_patterns')
-    
-    if sources.get('runbook') and not is_no_data(sources['runbook']):
-        evidence_sections.append(f"RUNBOOK GUIDANCE:\n{sources['runbook']}")
-        available_sources.append('AGENT:runbook')
-    
-    if sources.get('deployment') and not is_no_data(sources['deployment']):
-        evidence_sections.append(f"DEPLOYMENT HISTORY:\n{sources['deployment']}")
-        available_sources.append('AGENT:deployment_correlation')
-    
-    if sources.get('incident_history') and not is_no_data(sources['incident_history']):
-        evidence_sections.append(f"PAST INCIDENTS:\n{sources['incident_history']}")
-        available_sources.append('AGENT:past_incidents')
-    
-    # Get root cause description
-    rc_desc = ''
-    if root_causes:
-        rc = root_causes[0] if root_causes else {}
-        rc_desc = rc.get('description', '') if isinstance(rc, dict) else str(rc)
-    
-    # If no evidence at all, return basic recommendation from root cause
-    if not evidence_sections:
-        if rc_desc:
-            return [{
-                'category': 'manual_intervention',
-                'description': f'Investigate the root cause: {rc_desc[:200]}. Check CloudWatch metrics, application logs, and recent changes.',
-                'reasoning': 'Root cause analysis identified this issue. Manual investigation required.',
-                'source': 'RCA',
+    # 1. DEPLOYMENT CORRELATION - check for actual deployment data
+    deployment_data = sources.get('deployment', '')
+    if deployment_data and not is_no_data(deployment_data):
+        # Parse actual deployment info from the text
+        has_rollback = 'rolled_back' in deployment_data.lower()
+        has_failed = 'failed' in deployment_data.lower()
+        has_config = 'config:' in deployment_data.lower() or 'changed from' in deployment_data.lower()
+        
+        # Extract version numbers if present
+        import re
+        versions = re.findall(r'v[\d.]+', deployment_data)
+        version_str = versions[0] if versions else 'recent version'
+        
+        if has_rollback or has_failed:
+            recommendations.append({
+                'category': 'rollback',
+                'description': f'A deployment was rolled back or failed recently. Verify the current running version and consider rollback to the last stable version ({version_str} or earlier).',
+                'reasoning': f'Deployment history shows: {deployment_data[:150]}',
+                'source': 'AGENT:deployment_correlation',
+                'effectiveness': 4,
+                'risk': 'medium',
+                'estimated_ttr_minutes': 15,
+                'confidence': 85
+            })
+        elif has_config:
+            recommendations.append({
+                'category': 'configuration_change',
+                'description': 'Configuration changes detected. Review and consider reverting recent config changes if they correlate with incident timing.',
+                'reasoning': f'Config changes found: {deployment_data[:150]}',
+                'source': 'AGENT:deployment_correlation',
                 'effectiveness': 3,
                 'risk': 'low',
-                'estimated_ttr_minutes': 60,
-                'confidence': 65
-            }]
-        return [{
+                'estimated_ttr_minutes': 10,
+                'confidence': 75
+            })
+        else:
+            recommendations.append({
+                'category': 'manual_intervention',
+                'description': f'Recent deployments found. Review deployment {version_str} for potential issues.',
+                'reasoning': f'Deployment data: {deployment_data[:150]}',
+                'source': 'AGENT:deployment_correlation',
+                'effectiveness': 3,
+                'risk': 'low',
+                'estimated_ttr_minutes': 20,
+                'confidence': 70
+            })
+    else:
+        recommendations.append({
             'category': 'manual_intervention',
-            'description': f'Investigate the {service} service manually. Check CloudWatch metrics, application logs, and recent changes.',
-            'reasoning': 'No specific evidence available from automated investigation.',
-            'source': 'agent_advice',
-            'effectiveness': 2,
+            'description': 'No recent deployments or config changes found in the tracked system.',
+            'reasoning': 'Deployment history tool returned no data.',
+            'source': 'AGENT:deployment_correlation',
+            'effectiveness': 1,
+            'risk': 'low',
+            'estimated_ttr_minutes': 10,
+            'confidence': 50
+        })
+    
+    # 2. LOG PATTERNS - check for actual log data
+    log_data = sources.get('opensearch', '')
+    if log_data and not is_no_data(log_data):
+        # Parse actual error patterns
+        has_5xx = '5xx' in log_data.lower() or '500' in log_data or '502' in log_data or '503' in log_data
+        has_latency = 'latency' in log_data.lower() or 'timeout' in log_data.lower()
+        has_threshold = 'threshold' in log_data.lower()
+        
+        # Count occurrences
+        import re
+        error_counts = re.findall(r'count[:\s]*\(?(\d+)\)?', log_data.lower())
+        max_count = max([int(c) for c in error_counts]) if error_counts else 0
+        
+        if has_5xx and max_count > 100:
+            recommendations.append({
+                'category': 'scaling',
+                'description': f'High 5xx error rate detected ({max_count} errors). Scale horizontally or investigate backend capacity.',
+                'reasoning': f'Log analysis shows: {log_data[:150]}',
+                'source': 'AGENT:log_patterns',
+                'effectiveness': 4,
+                'risk': 'low',
+                'estimated_ttr_minutes': 15,
+                'confidence': 85
+            })
+        elif has_latency:
+            recommendations.append({
+                'category': 'manual_intervention',
+                'description': 'Latency/timeout patterns detected in logs. Check downstream dependencies and database connections.',
+                'reasoning': f'Log patterns: {log_data[:150]}',
+                'source': 'AGENT:log_patterns',
+                'effectiveness': 3,
+                'risk': 'low',
+                'estimated_ttr_minutes': 30,
+                'confidence': 75
+            })
+        else:
+            recommendations.append({
+                'category': 'manual_intervention',
+                'description': 'Error patterns found in logs. Review the specific alarm triggers for root cause.',
+                'reasoning': f'Log data: {log_data[:150]}',
+                'source': 'AGENT:log_patterns',
+                'effectiveness': 3,
+                'risk': 'low',
+                'estimated_ttr_minutes': 30,
+                'confidence': 70
+            })
+    else:
+        recommendations.append({
+            'category': 'manual_intervention',
+            'description': 'No log patterns found in OpenSearch. Check CloudWatch Logs directly.',
+            'reasoning': 'Log search tool returned no data.',
+            'source': 'AGENT:log_patterns',
+            'effectiveness': 1,
+            'risk': 'low',
+            'estimated_ttr_minutes': 20,
+            'confidence': 50
+        })
+    
+    # 3. RUNBOOK - check for actual runbook data
+    runbook_data = sources.get('runbook', '')
+    if runbook_data and not is_no_data(runbook_data):
+        # Extract runbook title and steps
+        import re
+        title_match = re.search(r'Runbook:\s*([^\n]+)', runbook_data)
+        title = title_match.group(1) if title_match else 'Available runbook'
+        
+        steps = re.findall(r'\d+\.\s*([^\n]+)', runbook_data)
+        first_step = steps[0] if steps else 'Follow documented procedures'
+        
+        recommendations.append({
+            'category': 'manual_intervention',
+            'description': f'Runbook available: "{title}". First step: {first_step}',
+            'reasoning': f'Runbook found with {len(steps)} steps: {runbook_data[:150]}',
+            'source': 'AGENT:runbook',
+            'effectiveness': 4,
+            'risk': 'low',
+            'estimated_ttr_minutes': 15,
+            'confidence': 85
+        })
+    else:
+        recommendations.append({
+            'category': 'manual_intervention',
+            'description': 'No runbook found for this alarm type. Follow general troubleshooting procedures.',
+            'reasoning': 'Runbook lookup returned no matching runbook.',
+            'source': 'AGENT:runbook',
+            'effectiveness': 1,
             'risk': 'low',
             'estimated_ttr_minutes': 60,
             'confidence': 50
-        }]
+        })
     
-    # Build the prompt
-    evidence_text = "\n\n".join(evidence_sections)
-    
-    prompt = f"""You are an expert SRE generating remediation recommendations for a production incident.
-
-SERVICE: {service}
-ALARM: {alarm_name or 'Unknown'}
-ROOT CAUSE: {rc_desc or 'Under investigation'}
-
-EVIDENCE FROM INVESTIGATION TOOLS:
-{evidence_text}
-
-AVAILABLE SOURCES FOR ATTRIBUTION: {', '.join(available_sources)}
-
-STRICT RULES:
-1. ONLY recommend actions supported by the evidence above
-2. DO NOT invent or assume information not in the evidence
-3. Each recommendation MUST cite its source from the available sources
-4. If deployment/config change is found, prioritize rollback as first action
-5. If runbook exists, include its specific steps
-6. If past incidents found, reference the resolution approach
-7. If logs show specific errors/alarms, address those patterns
-8. Be specific - include version numbers, config names, error types from the evidence
-9. Maximum 4 recommendations, prioritized by impact
-
-Generate 1-4 remediation recommendations as a JSON array. Each recommendation must have:
-- category: "rollback" | "scaling" | "configuration_change" | "manual_intervention"
-- description: Clear, actionable step (2-3 sentences, specific to the evidence)
-- reasoning: Why this action is recommended (reference specific evidence)
-- source: One of [{', '.join(available_sources)}] - MUST match the evidence used
-- effectiveness: 1-5 (5=highest impact)
-- risk: "low" | "medium" | "high"
-- estimated_ttr_minutes: Realistic time estimate
-- confidence: 50-95 (based on evidence strength)
-
-Return ONLY the JSON array, no other text."""
-
-    try:
-        response = bedrock.invoke_model(
-            modelId=MODEL_ID,
-            contentType='application/json',
-            accept='application/json',
-            body=json.dumps({
-                'anthropic_version': 'bedrock-2023-05-31',
-                'max_tokens': 2000,
-                'temperature': 0.3,
-                'messages': [{'role': 'user', 'content': prompt}]
+    # 4. PAST INCIDENTS - check for actual incident history
+    incident_data = sources.get('incident_history', '')
+    if incident_data and not is_no_data(incident_data):
+        # Extract past incident info
+        import re
+        incident_ids = re.findall(r'INC-[A-Z0-9]+', incident_data)
+        statuses = re.findall(r'Status:\s*(\w+)', incident_data)
+        
+        resolved_count = sum(1 for s in statuses if s.lower() == 'resolved')
+        
+        if incident_ids:
+            recommendations.append({
+                'category': 'manual_intervention',
+                'description': f'Similar past incidents found: {", ".join(incident_ids[:3])}. Review their resolutions for guidance.',
+                'reasoning': f'Incident history: {incident_data[:150]}',
+                'source': 'AGENT:past_incidents',
+                'effectiveness': 4,
+                'risk': 'low',
+                'estimated_ttr_minutes': 20,
+                'confidence': 80
             })
-        )
+        else:
+            recommendations.append({
+                'category': 'manual_intervention',
+                'description': 'Past incident data found. Review historical resolutions for this service.',
+                'reasoning': f'Historical data: {incident_data[:150]}',
+                'source': 'AGENT:past_incidents',
+                'effectiveness': 3,
+                'risk': 'low',
+                'estimated_ttr_minutes': 30,
+                'confidence': 70
+            })
+    else:
+        recommendations.append({
+            'category': 'manual_intervention',
+            'description': 'No similar past incidents found. This may be a new issue type for this service.',
+            'reasoning': 'Incident history search returned no matching incidents.',
+            'source': 'AGENT:past_incidents',
+            'effectiveness': 1,
+            'risk': 'low',
+            'estimated_ttr_minutes': 60,
+            'confidence': 50
+        })
+    
+    # 5. X-RAY TRACES - check for latency/error traces
+    xray_data = sources.get('xray', '')
+    if xray_data and not is_no_data(xray_data):
+        import re
+        has_errors = 'error' in xray_data.lower() or 'fault' in xray_data.lower()
+        has_slow = 'slow' in xray_data.lower() or 'latency' in xray_data.lower() or 'duration' in xray_data.lower()
         
-        result = json.loads(response['body'].read().decode('utf-8'))
-        content = result.get('content', [{}])[0].get('text', '[]')
+        # Extract response times if present
+        response_times = re.findall(r'(\d+)\s*ms', xray_data)
+        max_latency = max([int(t) for t in response_times]) if response_times else 0
         
-        # Parse JSON from response
-        recommendations = parse_json_response(content)
+        if has_errors:
+            recommendations.append({
+                'category': 'manual_intervention',
+                'description': f'X-Ray traces show error patterns. Investigate the failing requests and downstream dependencies.',
+                'reasoning': f'X-Ray trace analysis: {xray_data[:150]}',
+                'source': 'AGENT:xray_traces',
+                'effectiveness': 4,
+                'risk': 'low',
+                'estimated_ttr_minutes': 30,
+                'confidence': 80
+            })
+        elif has_slow and max_latency > 1000:
+            recommendations.append({
+                'category': 'scaling',
+                'description': f'X-Ray traces show high latency ({max_latency}ms). Consider scaling or optimizing slow endpoints.',
+                'reasoning': f'X-Ray latency data: {xray_data[:150]}',
+                'source': 'AGENT:xray_traces',
+                'effectiveness': 4,
+                'risk': 'low',
+                'estimated_ttr_minutes': 20,
+                'confidence': 85
+            })
+        else:
+            recommendations.append({
+                'category': 'manual_intervention',
+                'description': 'X-Ray trace data available. Review service graph and trace details for performance insights.',
+                'reasoning': f'X-Ray data: {xray_data[:150]}',
+                'source': 'AGENT:xray_traces',
+                'effectiveness': 3,
+                'risk': 'low',
+                'estimated_ttr_minutes': 30,
+                'confidence': 70
+            })
+    else:
+        recommendations.append({
+            'category': 'manual_intervention',
+            'description': 'No X-Ray trace data found. Enable X-Ray tracing for better observability.',
+            'reasoning': 'X-Ray trace search returned no data.',
+            'source': 'AGENT:xray_traces',
+            'effectiveness': 1,
+            'risk': 'low',
+            'estimated_ttr_minutes': 30,
+            'confidence': 50
+        })
+    
+    # 6. AWS CONFIG - check for compliance/drift issues
+    config_data = sources.get('config', '')
+    if config_data and not is_no_data(config_data):
+        has_non_compliant = 'non_compliant' in config_data.lower() or 'non-compliant' in config_data.lower()
+        has_drift = 'drift' in config_data.lower() or 'changed' in config_data.lower()
         
-        # Validate and fix sources
-        recommendations = validate_recommendations(recommendations, available_sources)
-        
-        print(f'AI generated {len(recommendations)} recommendations')
-        return recommendations
-        
-    except Exception as e:
-        print(f'Bedrock call failed: {e}')
-        # Fallback to rule-based recommendations
-        return generate_fallback_recommendations(sources, root_causes, service)
+        if has_non_compliant:
+            recommendations.append({
+                'category': 'configuration_change',
+                'description': 'AWS Config shows non-compliant resources. Review and remediate compliance violations.',
+                'reasoning': f'Config compliance data: {config_data[:150]}',
+                'source': 'AGENT:config_drift',
+                'effectiveness': 4,
+                'risk': 'medium',
+                'estimated_ttr_minutes': 45,
+                'confidence': 80
+            })
+        elif has_drift:
+            recommendations.append({
+                'category': 'configuration_change',
+                'description': 'Configuration drift detected. Review recent changes and verify they are intentional.',
+                'reasoning': f'Config drift data: {config_data[:150]}',
+                'source': 'AGENT:config_drift',
+                'effectiveness': 3,
+                'risk': 'low',
+                'estimated_ttr_minutes': 30,
+                'confidence': 75
+            })
+        else:
+            recommendations.append({
+                'category': 'manual_intervention',
+                'description': 'AWS Config data available. Review configuration state for potential issues.',
+                'reasoning': f'Config data: {config_data[:150]}',
+                'source': 'AGENT:config_drift',
+                'effectiveness': 2,
+                'risk': 'low',
+                'estimated_ttr_minutes': 30,
+                'confidence': 65
+            })
+    else:
+        recommendations.append({
+            'category': 'manual_intervention',
+            'description': 'No AWS Config data found. Enable Config for configuration tracking and compliance.',
+            'reasoning': 'AWS Config check returned no data.',
+            'source': 'AGENT:config_drift',
+            'effectiveness': 1,
+            'risk': 'low',
+            'estimated_ttr_minutes': 30,
+            'confidence': 50
+        })
+    
+    return recommendations
 
 
 def parse_json_response(content):
@@ -285,9 +473,10 @@ def fix_unescaped_quotes(json_str):
 
 
 def validate_recommendations(recommendations, available_sources):
-    """Validate and fix recommendation sources."""
+    """Validate and fix recommendation sources, ensuring all sources are covered."""
     valid_sources = set(available_sources + ['RCA', 'agent_advice'])
     validated = []
+    used_sources = set()
     
     for rec in recommendations:
         if not isinstance(rec, dict):
@@ -308,6 +497,8 @@ def validate_recommendations(recommendations, available_sources):
             else:
                 rec['source'] = available_sources[0] if available_sources else 'RCA'
         
+        used_sources.add(rec['source'])
+        
         # Ensure valid category
         valid_categories = ['rollback', 'scaling', 'configuration_change', 'manual_intervention']
         if rec.get('category') not in valid_categories:
@@ -324,14 +515,66 @@ def validate_recommendations(recommendations, available_sources):
         
         validated.append(rec)
     
-    return validated[:4]  # Max 4 recommendations
+    # Ensure all available sources are covered - add fallback recommendations for missing sources
+    missing_sources = set(available_sources) - used_sources
+    for missing_source in missing_sources:
+        
+        # Generate a fallback recommendation for the missing source
+        source_type = missing_source.split(':')[-1] if ':' in missing_source else missing_source
+        
+        if 'log' in source_type.lower():
+            validated.append({
+                'category': 'manual_intervention',
+                'description': 'Investigate the error patterns found in logs. The log analysis shows alarm triggers that correlate with the incident.',
+                'reasoning': 'Log patterns from OpenSearch indicate recurring issues that need attention.',
+                'source': missing_source,
+                'effectiveness': 3,
+                'risk': 'low',
+                'estimated_ttr_minutes': 30,
+                'confidence': 70
+            })
+        elif 'runbook' in source_type.lower():
+            validated.append({
+                'category': 'manual_intervention',
+                'description': 'Follow the documented runbook procedures for this alarm type.',
+                'reasoning': 'A runbook with remediation guidance is available.',
+                'source': missing_source,
+                'effectiveness': 3,
+                'risk': 'low',
+                'estimated_ttr_minutes': 30,
+                'confidence': 75
+            })
+        elif 'deployment' in source_type.lower():
+            validated.append({
+                'category': 'configuration_change',
+                'description': 'Review recent deployments and configuration changes that may correlate with the incident.',
+                'reasoning': 'Deployment history shows recent changes.',
+                'source': missing_source,
+                'effectiveness': 4,
+                'risk': 'medium',
+                'estimated_ttr_minutes': 30,
+                'confidence': 75
+            })
+        elif 'incident' in source_type.lower() or 'past' in source_type.lower():
+            validated.append({
+                'category': 'manual_intervention',
+                'description': 'Review similar past incidents for resolution patterns that may apply.',
+                'reasoning': 'Historical incident data provides context for resolution.',
+                'source': missing_source,
+                'effectiveness': 3,
+                'risk': 'low',
+                'estimated_ttr_minutes': 45,
+                'confidence': 70
+            })
+    
+    return validated  # Return all recommendations - no limit
 
 
 def generate_fallback_recommendations(sources, root_causes, service):
-    """Generate rule-based recommendations as fallback."""
+    """Generate rule-based recommendations for ALL 4 sources."""
     recommendations = []
     
-    # Deployment-based recommendation
+    # 1. Deployment-based recommendation (always include)
     if sources.get('deployment') and not is_no_data(sources['deployment']):
         recommendations.append({
             'category': 'configuration_change',
@@ -343,8 +586,19 @@ def generate_fallback_recommendations(sources, root_causes, service):
             'estimated_ttr_minutes': 30,
             'confidence': 75
         })
+    else:
+        recommendations.append({
+            'category': 'manual_intervention',
+            'description': f'No recent deployments found for {service}. Verify deployment history manually and check if any infrastructure changes occurred outside the tracked system.',
+            'reasoning': 'No deployment data available - manual verification recommended.',
+            'source': 'AGENT:deployment_correlation',
+            'effectiveness': 2,
+            'risk': 'low',
+            'estimated_ttr_minutes': 20,
+            'confidence': 50
+        })
     
-    # Log-based recommendation
+    # 2. Log-based recommendation (always include)
     if sources.get('opensearch') and not is_no_data(sources['opensearch']):
         recommendations.append({
             'category': 'manual_intervention',
@@ -356,8 +610,19 @@ def generate_fallback_recommendations(sources, root_causes, service):
             'estimated_ttr_minutes': 45,
             'confidence': 70
         })
+    else:
+        recommendations.append({
+            'category': 'manual_intervention',
+            'description': f'No log patterns found in OpenSearch for {service}. Check CloudWatch Logs directly and verify log ingestion is working correctly.',
+            'reasoning': 'No log data available - manual log review recommended.',
+            'source': 'AGENT:log_patterns',
+            'effectiveness': 2,
+            'risk': 'low',
+            'estimated_ttr_minutes': 30,
+            'confidence': 50
+        })
     
-    # Runbook-based recommendation
+    # 3. Runbook-based recommendation (always include)
     if sources.get('runbook') and not is_no_data(sources['runbook']):
         recommendations.append({
             'category': 'manual_intervention',
@@ -369,8 +634,19 @@ def generate_fallback_recommendations(sources, root_causes, service):
             'estimated_ttr_minutes': 30,
             'confidence': 80
         })
+    else:
+        recommendations.append({
+            'category': 'manual_intervention',
+            'description': f'No runbook found for this alarm type. Consider creating a runbook for {service} incidents to improve future response times.',
+            'reasoning': 'No runbook available - follow general troubleshooting procedures.',
+            'source': 'AGENT:runbook',
+            'effectiveness': 2,
+            'risk': 'low',
+            'estimated_ttr_minutes': 60,
+            'confidence': 50
+        })
     
-    # Past incidents recommendation
+    # 4. Past incidents recommendation (always include)
     if sources.get('incident_history') and not is_no_data(sources['incident_history']):
         recommendations.append({
             'category': 'manual_intervention',
@@ -382,22 +658,17 @@ def generate_fallback_recommendations(sources, root_causes, service):
             'estimated_ttr_minutes': 45,
             'confidence': 75
         })
-    
-    # Root cause based if nothing else
-    if not recommendations and root_causes:
-        rc = root_causes[0] if root_causes else {}
-        rc_desc = rc.get('description', '') if isinstance(rc, dict) else str(rc)
-        if rc_desc:
-            recommendations.append({
-                'category': 'manual_intervention',
-                'description': f'Investigate the identified root cause: {rc_desc[:150]}',
-                'reasoning': 'Root cause analysis identified this as the likely cause.',
-                'source': 'RCA',
-                'effectiveness': 3,
-                'risk': 'medium',
-                'estimated_ttr_minutes': 60,
-                'confidence': 65
-            })
+    else:
+        recommendations.append({
+            'category': 'manual_intervention',
+            'description': f'No similar past incidents found for {service}. This may be a new issue type - document the resolution for future reference.',
+            'reasoning': 'No historical incident data available - this appears to be a new issue.',
+            'source': 'AGENT:past_incidents',
+            'effectiveness': 2,
+            'risk': 'low',
+            'estimated_ttr_minutes': 60,
+            'confidence': 50
+        })
     
     return recommendations
 
@@ -408,7 +679,9 @@ def parse_investigation_sources(investigation):
         'opensearch': '',
         'runbook': '',
         'deployment': '',
-        'incident_history': ''
+        'incident_history': '',
+        'xray': '',
+        'config': ''
     }
     
     if not investigation:
@@ -435,10 +708,14 @@ def parse_investigation_sources(investigation):
             sources['opensearch'] = content
         elif 'runbook' in tag_name:
             sources['runbook'] = content
-        elif 'deployment' in tag_name or 'config' in tag_name:
+        elif 'deployment' in tag_name:
             sources['deployment'] = content
         elif 'incident' in tag_name or 'history' in tag_name or 'past' in tag_name:
             sources['incident_history'] = content
+        elif 'x-ray' in tag_name or 'xray' in tag_name or 'trace' in tag_name:
+            sources['xray'] = content
+        elif 'config' in tag_name or 'compliance' in tag_name or 'drift' in tag_name:
+            sources['config'] = content
     
     return sources
 
@@ -496,6 +773,10 @@ def generate_summary(recommendations, sources):
         evidence_found.append('runbook')
     if sources.get('incident_history') and not is_no_data(sources['incident_history']):
         evidence_found.append('past incidents')
+    if sources.get('xray') and not is_no_data(sources['xray']):
+        evidence_found.append('X-Ray traces')
+    if sources.get('config') and not is_no_data(sources['config']):
+        evidence_found.append('Config compliance')
     
     # Priority action
     top_rec = recommendations[0]
