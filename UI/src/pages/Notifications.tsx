@@ -32,11 +32,22 @@ interface TicketRecord {
   pagerduty_url?: string
 }
 
+interface PagerDutyRecord {
+  pagerduty_id: string
+  pagerduty_url: string
+  incident_id: string
+  service: string
+  severity: number
+  status: string
+  summary: string
+}
+
 export default function Notifications() {
   const [notifications, setNotifications] = useState<NotificationRecord[]>([])
   const [tickets, setTickets] = useState<TicketRecord[]>([])
+  const [pagerdutyIncidents, setPagerdutyIncidents] = useState<PagerDutyRecord[]>([])
   const [loading, setLoading] = useState(true)
-  const [tab, setTab] = useState<'tickets' | 'sns'>('tickets')
+  const [tab, setTab] = useState<'jira' | 'pagerduty' | 'sns'>('jira')
 
   useEffect(() => {
     const fetchData = async () => {
@@ -44,6 +55,7 @@ export default function Notifications() {
         const incidents = await getActiveIncidents()
         const notifs: NotificationRecord[] = []
         const tix: TicketRecord[] = []
+        const pdIncidents: PagerDutyRecord[] = []
 
         for (const inc of incidents) {
           // Extract notifications
@@ -56,7 +68,7 @@ export default function Notifications() {
             } catch { /* skip */ }
           }
 
-          // Extract tickets
+          // Extract Jira tickets
           if (inc.ticket) {
             const ticketContent = raw.ticket_content as string | undefined
             let parsed: Record<string, string> = {}
@@ -77,13 +89,28 @@ export default function Notifications() {
               pagerduty_url: inc.pagerduty_url
             })
           }
+
+          // Extract PagerDuty incidents
+          if (inc.pagerduty_id) {
+            pdIncidents.push({
+              pagerduty_id: inc.pagerduty_id,
+              pagerduty_url: inc.pagerduty_url || `https://app.pagerduty.com/incidents?search=${inc.id}`,
+              incident_id: inc.id,
+              service: inc.service,
+              severity: inc.severity,
+              status: inc.status,
+              summary: inc.title
+            })
+          }
         }
 
         setNotifications(notifs)
         setTickets(tix)
+        setPagerdutyIncidents(pdIncidents)
       } catch {
         setNotifications([])
         setTickets([])
+        setPagerdutyIncidents([])
       } finally {
         setLoading(false)
       }
@@ -119,27 +146,43 @@ export default function Notifications() {
         <div
           className="absolute top-1 bottom-1 rounded-lg transition-all duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
           style={{
-            left: tab === 'tickets' ? '4px' : '50%',
-            width: 'calc(50% - 4px)',
-            background: tab === 'tickets'
+            left: tab === 'jira' ? '4px' : tab === 'pagerduty' ? 'calc(33.33% + 2px)' : 'calc(66.66% + 2px)',
+            width: 'calc(33.33% - 4px)',
+            background: tab === 'jira'
               ? 'linear-gradient(135deg, rgba(59,130,246,0.2), rgba(99,102,241,0.15))'
+              : tab === 'pagerduty'
+              ? 'linear-gradient(135deg, rgba(34,197,94,0.2), rgba(22,163,74,0.15))'
               : 'linear-gradient(135deg, rgba(168,85,247,0.2), rgba(139,92,246,0.15))',
-            boxShadow: tab === 'tickets'
+            boxShadow: tab === 'jira'
               ? '0 0 12px rgba(59,130,246,0.15)'
+              : tab === 'pagerduty'
+              ? '0 0 12px rgba(34,197,94,0.15)'
               : '0 0 12px rgba(168,85,247,0.15)',
           }}
         />
         <button
-          onClick={() => setTab('tickets')}
+          onClick={() => setTab('jira')}
           className={`relative z-10 flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 ${
-            tab === 'tickets' ? 'text-blue-400' : 'text-gray-400 hover:text-gray-200'
+            tab === 'jira' ? 'text-blue-400' : 'text-gray-400 hover:text-gray-200'
           }`}
         >
-          <Ticket className={`w-4 h-4 transition-transform duration-200 ${tab === 'tickets' ? 'scale-110' : ''}`} />
-          <span>Tickets</span>
+          <Ticket className={`w-4 h-4 transition-transform duration-200 ${tab === 'jira' ? 'scale-110' : ''}`} />
+          <span>Jira</span>
           <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold transition-all duration-200 ${
-            tab === 'tickets' ? 'bg-blue-500/20 text-blue-300' : 'bg-gray-800 text-gray-500'
+            tab === 'jira' ? 'bg-blue-500/20 text-blue-300' : 'bg-gray-800 text-gray-500'
           }`}>{tickets.length}</span>
+        </button>
+        <button
+          onClick={() => setTab('pagerduty')}
+          className={`relative z-10 flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-lg transition-all duration-200 ${
+            tab === 'pagerduty' ? 'text-green-400' : 'text-gray-400 hover:text-gray-200'
+          }`}
+        >
+          <Zap className={`w-4 h-4 transition-transform duration-200 ${tab === 'pagerduty' ? 'scale-110' : ''}`} />
+          <span>PagerDuty</span>
+          <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold transition-all duration-200 ${
+            tab === 'pagerduty' ? 'bg-green-500/20 text-green-300' : 'bg-gray-800 text-gray-500'
+          }`}>{pagerdutyIncidents.length}</span>
         </button>
         <button
           onClick={() => setTab('sns')}
@@ -148,21 +191,34 @@ export default function Notifications() {
           }`}
         >
           <Bell className={`w-4 h-4 transition-transform duration-200 ${tab === 'sns' ? 'scale-110 animate-pulse' : ''}`} />
-          <span>SNS Alerts</span>
+          <span>SNS</span>
           <span className={`ml-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold transition-all duration-200 ${
             tab === 'sns' ? 'bg-purple-500/20 text-purple-300' : 'bg-gray-800 text-gray-500'
           }`}>{notifications.length}</span>
         </button>
       </div>
 
-      {/* Tickets Tab */}
-      {tab === 'tickets' && (
+      {/* Jira Tab */}
+      {tab === 'jira' && (
         <div className="space-y-2 animate-fade-in-up">
           {tickets.length === 0 ? (
-            <div className="bg-[#161b22] border border-gray-800 rounded-xl p-8 text-center text-gray-500 animate-scale-in">No tickets</div>
+            <div className="bg-[#161b22] border border-gray-800 rounded-xl p-8 text-center text-gray-500 animate-scale-in">No Jira tickets</div>
           ) : tickets.map((t, i) => (
             <div key={i} className="animate-fade-in-up" style={{ animationDelay: `${Math.min(i * 40, 400)}ms` }}>
               <ExpandableTicket ticket={t} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* PagerDuty Tab */}
+      {tab === 'pagerduty' && (
+        <div className="space-y-2 animate-fade-in-up">
+          {pagerdutyIncidents.length === 0 ? (
+            <div className="bg-[#161b22] border border-gray-800 rounded-xl p-8 text-center text-gray-500 animate-scale-in">No PagerDuty incidents</div>
+          ) : pagerdutyIncidents.map((pd, i) => (
+            <div key={i} className="animate-fade-in-up" style={{ animationDelay: `${Math.min(i * 40, 400)}ms` }}>
+              <ExpandablePagerDuty incident={pd} />
             </div>
           ))}
         </div>
@@ -261,6 +317,53 @@ function ExpandableNotification({ notif }: { notif: NotificationRecord }) {
         <div className="flex items-center gap-3">
           <span className="text-xs text-gray-600">{notif.sent_at ? new Date(notif.sent_at).toLocaleTimeString() : ''}</span>
           <ChevronRight className="w-4 h-4 text-gray-600" />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ExpandablePagerDuty({ incident }: { incident: PagerDutyRecord }) {
+  const navigate = useNavigate()
+  const severityColors: Record<number, string> = {
+    5: 'bg-red-900/50 text-red-300',
+    4: 'bg-red-900/40 text-red-300',
+    3: 'bg-orange-900/50 text-orange-300',
+    2: 'bg-yellow-900/50 text-yellow-300',
+    1: 'bg-blue-900/50 text-blue-300'
+  }
+
+  return (
+    <div className="bg-[#161b22] border border-gray-800 rounded-xl overflow-hidden hover:border-green-800/50 hover-lift transition-all duration-200">
+      <div className="flex items-center justify-between px-4 py-3">
+        <div className="flex items-center gap-4 min-w-0 flex-1 cursor-pointer" onClick={() => navigate(`/incidents/${incident.incident_id}`)}>
+          <div className="w-8 h-8 bg-green-900/30 rounded-lg flex items-center justify-center flex-shrink-0">
+            <Zap className="w-4 h-4 text-green-400" />
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-medium text-green-400">{incident.pagerduty_id}</span>
+              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${severityColors[incident.severity] || severityColors[3]}`}>
+                SEV-{incident.severity}
+              </span>
+              <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-green-900/30 text-green-300">{incident.status}</span>
+            </div>
+            <p className="text-xs text-gray-400 mt-0.5 truncate">{incident.summary}</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3 flex-shrink-0">
+          <span className="text-xs text-gray-500">{incident.service}</span>
+          <a
+            href={incident.pagerduty_url}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="p-1.5 rounded-md hover:bg-green-900/30 text-gray-500 hover:text-green-400 transition-colors"
+            title="Open in PagerDuty"
+          >
+            <ExternalLink className="w-4 h-4" />
+          </a>
+          <ChevronRight className="w-4 h-4 text-gray-600 cursor-pointer" onClick={() => navigate(`/incidents/${incident.incident_id}`)} />
         </div>
       </div>
     </div>
