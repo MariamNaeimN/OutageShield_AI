@@ -69,7 +69,8 @@ AI-powered incident detection, root-cause analysis, autonomous investigation, an
 │  │  ├── outageshield-incidents-dev    └── outageshield-logs (alarm events)      │   │
 │  │  ├── outageshield-events-dev                                                 │   │
 │  │  ├── outageshield-postmortems-dev                                            │   │
-│  │  └── outageshield-runbooks-dev                                               │   │
+│  │  ├── outageshield-runbooks-dev                                               │   │
+│  │  └── outageshield-deployments-dev  ← CI/CD integration                       │   │
 │  └──────────────────────────────────────────────────────────────────────────────┘   │
 │                                          │                                          │
 │                              DynamoDB Streams                                       │
@@ -274,8 +275,11 @@ AI-powered incident detection, root-cause analysis, autonomous investigation, an
 | 11 | WebSocket | API Gateway WebSocket, DynamoDB Streams |
 | 12 | CloudFront | S3 + CloudFront (React SPA) |
 | 13 | Bedrock Agent | Bedrock Agent, Agent Actions Lambda, Agent Invoker Lambda |
+| 14 | CloudTrail Deployments | EventBridge Rules, Lambda (automatic deployment tracking) |
 
 ---
+
+## Bedrock Agent — Autonomous Investigation
 
 The agent autonomously investigates each incident using 4 tools:
 
@@ -284,9 +288,106 @@ The agent autonomously investigates each incident using 4 tools:
 | `searchIncidentHistory` | DynamoDB | Find past incidents on same service (excludes current) |
 | `searchLogs` | OpenSearch Serverless | Search alarm patterns and error messages |
 | `getRunbook` | DynamoDB | Look up remediation procedures |
-| `checkDeployments` | Deployment history | Find recent config/deployment changes |
+| `checkDeployments` | DynamoDB (deployments table) | Find recent deployments and config changes (real data from CI/CD) |
 
-Results feed directly into the Remediation Lambda as evidence for source-attributed recommendations.
+Results are stored in `agent_investigation` field with `[Source: ...]` tags and feed directly into the AI-powered Remediation Lambda.
+
+---
+
+## AI-Powered Remediation
+
+The Remediation Lambda uses **Bedrock Claude** to generate smart, evidence-based recommendations:
+
+### Features
+
+- **AI-Generated**: Uses Claude 3 Haiku to analyze evidence and generate actionable recommendations
+- **Anti-Hallucination**: Only recommends actions supported by actual evidence from investigation tools
+- **Source Attribution**: Every recommendation cites its source (AGENT:log_patterns, AGENT:runbook, etc.)
+- **Smart JSON Parsing**: Handles AI response quirks (smart quotes, unescaped quotes in strings)
+- **Fallback Logic**: Falls back to rule-based recommendations if AI fails
+
+### How It Works
+
+```
+Agent Investigation → Parse [Source: ...] tags → Build Evidence Sections → Bedrock Prompt → Parse JSON → Validate Sources → Store to DynamoDB
+```
+
+1. **Parse Sources**: Extracts content from `[Source: OpenSearch Logs]`, `[Source: Runbook DB]`, etc.
+2. **Filter No-Data**: Skips sources with "No relevant data found" or similar
+3. **Build Prompt**: Constructs evidence-based prompt with strict anti-hallucination rules
+4. **AI Generation**: Bedrock generates 1-4 recommendations as JSON array
+5. **JSON Parsing**: Handles smart quotes (", ") and unescaped inner quotes
+6. **Validation**: Ensures valid categories, sources, and numeric fields
+7. **Storage**: Saves to DynamoDB `recommendations_raw` field
+
+### Recommendation Schema
+
+```json
+{
+  "category": "rollback | scaling | configuration_change | manual_intervention",
+  "description": "Clear, actionable step (2-3 sentences)",
+  "reasoning": "Why this action is recommended (references evidence)",
+  "source": "AGENT:log_patterns | AGENT:runbook | AGENT:deployment_correlation | AGENT:past_incidents | RCA",
+  "effectiveness": 1-5,
+  "risk": "low | medium | high",
+  "estimated_ttr_minutes": 15-120,
+  "confidence": 50-95
+}
+
+---
+
+## CloudTrail Integration (Automatic Deployment Tracking)
+
+Stack 14 automatically captures deployment and configuration changes from CloudTrail and writes them to the `outageshield-deployments-dev` table. This enables the agent to correlate incidents with real infrastructure changes.
+
+### Tracked Events
+
+| AWS Service | Events Captured | Type |
+|-------------|-----------------|------|
+| **Lambda** | UpdateFunctionCode, UpdateFunctionConfiguration, PublishVersion | deployment / config_change |
+| **ECS** | UpdateService, CreateService, RegisterTaskDefinition | deployment |
+| **CodeDeploy** | CreateDeployment | deployment |
+| **Parameter Store** | PutParameter, DeleteParameter | config_change |
+| **Secrets Manager** | UpdateSecret, RotateSecret, PutSecretValue | config_change |
+| **CloudFormation** | CreateStack, UpdateStack, DeleteStack | deployment |
+| **RDS** | ModifyDBInstance, ModifyDBCluster | config_change |
+
+### How It Works
+
+```
+CloudTrail Event → EventBridge Rule → Lambda: outageshield-deployment-tracker-dev → DynamoDB
+```
+
+1. **CloudTrail** logs all AWS API calls
+2. **EventBridge Rules** filter for deployment-related events
+3. **Deployment Tracker Lambda** extracts service name, deployer, and change details
+4. **DynamoDB** stores the record with `source: "cloudtrail"`
+
+### Example CloudTrail-Sourced Record
+
+```json
+{
+  "deployment_id": "deploy-my-lambda-abc123",
+  "service": "my-lambda-function",
+  "timestamp": "2026-05-25T10:30:00Z",
+  "type": "deployment",
+  "status": "succeeded",
+  "deployed_by": "github-actions",
+  "source": "cloudtrail",
+  "event_name": "UpdateFunctionCode",
+  "event_source": "lambda.amazonaws.com",
+  "aws_region": "us-east-1"
+}
+```
+
+### Combining with CI/CD Webhooks
+
+For richer deployment metadata (commit SHA, PR number, release notes), combine CloudTrail with direct CI/CD integration:
+
+- **CloudTrail**: Automatic, captures all AWS changes, minimal metadata
+- **CI/CD Webhooks**: Manual integration, rich metadata (commit, PR, changelog)
+
+See `docs/data-ingestion-guide.md` for CI/CD integration examples.
 
 ---
 
@@ -294,11 +395,34 @@ Results feed directly into the Remediation Lambda as evidence for source-attribu
 
 The Remediation Lambda enforces strict evidence-based rules:
 
-- Every recommendation must cite its source: `RCA`, `AGENT:runbook`, `AGENT:past_incidents`, `AGENT:deployment_correlation`, `AGENT:log_patterns`, or `agent_advice`
-- Sources are only used when the agent **actually found data** — negative signals ("No deployments found", "No past incidents") suppress injection
-- `ensure_all_sources()` deterministically injects missing sources only when positive evidence exists
-- Confidence 90%+ requires runbook match or 3+ past incidents; below 70% for inference only
-- Falls back to `manual_intervention` with `agent_advice` when data is lacking
+- **Evidence-Only**: AI can only recommend actions supported by actual investigation data
+- **Source Validation**: Each recommendation must cite a valid source from the available evidence
+- **Negative Signal Detection**: Sources with "No data found", "No past incidents", etc. are excluded
+- **Confidence Scaling**: Higher confidence requires stronger evidence (runbook match, multiple past incidents)
+- **Fallback Safety**: Falls back to `manual_intervention` with `agent_advice` when data is lacking
+
+### Prompt Rules (sent to Bedrock)
+
+1. ONLY recommend actions supported by the evidence
+2. DO NOT invent or assume information not in the evidence
+3. Each recommendation MUST cite its source from available sources
+4. If deployment/config change found, prioritize rollback as first action
+5. If runbook exists, include its specific steps
+6. If past incidents found, reference the resolution approach
+7. If logs show specific errors, address those patterns
+8. Be specific — include version numbers, config names, error types from evidence
+9. Maximum 4 recommendations, prioritized by impact
+
+### Remediation Sources
+
+| Source | Description | Data Origin |
+|--------|-------------|-------------|
+| `AGENT:log_patterns` | Log analysis findings | OpenSearch Serverless |
+| `AGENT:runbook` | Runbook-based procedures | DynamoDB runbooks table |
+| `AGENT:deployment_correlation` | Recent deployment/config changes | DynamoDB deployments table + CloudTrail |
+| `AGENT:past_incidents` | Similar past incidents | DynamoDB incidents table |
+| `RCA` | Root cause analysis | Bedrock Claude reasoning |
+| `agent_advice` | General agent recommendations | Bedrock Agent investigation |
 
 ---
 
@@ -323,9 +447,25 @@ The Scoring Lambda reasons step-by-step about each incident's business impact ag
 React 18 + TypeScript + Vite + Tailwind CSS
 
 - **Dashboard** — active incidents, service risk heatmap, business impact
-- **Incident Detail** — root causes with confidence bars + evidence, remediation recommendations with source badges, autonomous agent investigation (4 sections), Jira ticket, SNS notification
+- **Incident Detail** — comprehensive incident view with:
+  - Root causes with confidence bars + evidence
+  - Remediation recommendations with source badges (deployment, logs, runbook, past incidents)
+  - Technical Investigation (Bedrock Agent findings from 4 sources)
+  - SNS Notification details (recipient, subject, full message content, delivery status)
+  - Jira ticket integration
+  - Business impact metrics (revenue at risk, affected users, SLA status)
 - **Postmortems** — AI-generated reports with summary, root cause, impact, prevention steps
 - **Real-time** — WebSocket push from DynamoDB Streams
+
+### Incident Detail Sections
+
+| Section | Description |
+|---------|-------------|
+| **Root Cause Analysis** | AI-identified causes with confidence %, evidence list |
+| **Recommended Actions** | Source-attributed remediation steps with risk level, time estimate, confidence |
+| **Technical Investigation** | Bedrock Agent autonomous findings: Past Incidents, Log Analysis, Runbook, Deployment History |
+| **SNS Notification** | Full notification details: type, channel, recipient, subject, message content, linked ticket |
+| **Quick Links** | View Postmortem, Open Jira Ticket |
 
 ---
 
@@ -360,7 +500,20 @@ React 18 + TypeScript + Vite + Tailwind CSS
 
   "ticket_id": "TGSHLD-1234",
   "ticket_status": "Open",
-  "notifications": "{\"type\":\"escalation\",\"recipient\":\"sre-team@...\"}",
+  "ticket_url": "https://corpinfollc.atlassian.net/browse/TGSHLD-1234",
+  
+  "notifications": {
+    "type": "escalation",
+    "channel": "SNS",
+    "status": "sent",
+    "recipient": "sre-team@shopsphere.com",
+    "subject": "[OutageShield] SEV-4 | checkout-service | Incident on checkout-service",
+    "message": "OutageShield AI - Incident Alert\n==================================================\n\nService: checkout-service\nSeverity: SEV-4\n...",
+    "sent_at": "2026-05-23T19:16:30Z",
+    "ticket_id": "TGSHLD-1234",
+    "ticket_url": "https://corpinfollc.atlassian.net/browse/TGSHLD-1234"
+  },
+  
   "postmortem_generated": true
 }
 ```
@@ -438,15 +591,22 @@ aws cloudfront create-invalidation --distribution-id <ID> --paths "/*"
 
 | Script | Purpose |
 |--------|---------|
-| `scripts/clear-and-push.py` | Delete all data (keep runbooks) + push 100 fresh incidents |
-| `scripts/test-one.py` | Trigger one incident and trace the full pipeline |
-| `scripts/test-complex.py` | Trigger a complex incident (different service/alarm type) |
+| `scripts/insert-5-incidents.py` | Insert test incidents |
+| `scripts/insert-sample-deployments.py` | Insert sample deployment data for testing |
 | `scripts/rebuild-layer.py` | Rebuild the opensearch-py Lambda Layer |
-| `scripts/lambdas/update-remediation-lambda2.py` | Deploy Remediation Lambda (anti-hallucination + smart source injection) |
+| `scripts/reprocess-all.py` | Reprocess all incidents through the pipeline |
+| `scripts/refresh-remediation.py` | Refresh remediation recommendations for all incidents |
+| `scripts/refresh-agent-investigation.py` | Re-run Bedrock Agent investigation for incidents |
+| `scripts/check-notifications.py` | Check incidents for SNS notification data |
+| `scripts/check-recs.py` | Check remediation recommendations in DynamoDB |
+| `scripts/test-api.py` | Test Dashboard API Lambda responses |
+| `scripts/test-remediation-lambda.py` | Test remediation Lambda with specific incident |
+| `scripts/debug-bedrock-response.py` | Debug Bedrock AI response and JSON parsing |
+| `scripts/lambdas/update-remediation-lambda2.py` | Deploy Remediation Lambda (AI-powered, anti-hallucination, smart JSON parsing) |
 | `scripts/lambdas/update-rca-lambda-v2.py` | Deploy RCA Lambda (bulletproof parsing) |
 | `scripts/lambdas/update-postmortem-lambda.py` | Deploy Postmortem Lambda (uses all previous steps) |
 | `scripts/lambdas/update-detection-opensearch.py` | Deploy Detection Lambda (correct service name extraction) |
-| `scripts/lambdas/fix-agent-actions.py` | Deploy Agent Actions Lambda (OpenSearch hybrid search) |
+| `scripts/lambdas/fix-agent-actions.py` | Deploy Agent Actions Lambda (real deployment data from DynamoDB) |
 | `scripts/lambdas/update-agent-invoker.py` | Deploy Agent Invoker Lambda (XML tag cleaning) |
 | `scripts/lambdas/update-scoring-lambda.py` | Deploy Scoring Lambda (specific revenue amounts) |
 

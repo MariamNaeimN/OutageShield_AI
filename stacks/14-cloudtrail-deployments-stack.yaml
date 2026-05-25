@@ -1,0 +1,477 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  OutageShield AI - CloudTrail Deployment Tracking
+  Automatically captures deployment and config change events from CloudTrail
+  and writes them to the deployments DynamoDB table.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+Resources:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Lambda - CloudTrail Event Processor
+  # ─────────────────────────────────────────────────────────────────────────────
+  DeploymentTrackerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub outageshield-deployment-tracker-${Environment}
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Timeout: 30
+      MemorySize: 256
+      Role: !GetAtt DeploymentTrackerRole.Arn
+      Environment:
+        Variables:
+          DEPLOYMENTS_TABLE: !Sub outageshield-deployments-${Environment}
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          import hashlib
+
+          dynamodb = boto3.resource('dynamodb')
+          table = dynamodb.Table(os.environ['DEPLOYMENTS_TABLE'])
+
+          # Map CloudTrail events to deployment types
+          DEPLOYMENT_EVENTS = {
+              # Lambda
+              'UpdateFunctionCode': {'type': 'deployment', 'service_field': 'functionName'},
+              'UpdateFunctionConfiguration': {'type': 'config_change', 'service_field': 'functionName'},
+              'PublishVersion': {'type': 'deployment', 'service_field': 'functionName'},
+              
+              # ECS
+              'UpdateService': {'type': 'deployment', 'service_field': 'service'},
+              'CreateService': {'type': 'deployment', 'service_field': 'serviceName'},
+              'RegisterTaskDefinition': {'type': 'deployment', 'service_field': 'family'},
+              
+              # CodeDeploy
+              'CreateDeployment': {'type': 'deployment', 'service_field': 'applicationName'},
+              
+              # Parameter Store
+              'PutParameter': {'type': 'config_change', 'service_field': 'name'},
+              'DeleteParameter': {'type': 'config_change', 'service_field': 'name'},
+              
+              # Secrets Manager
+              'UpdateSecret': {'type': 'config_change', 'service_field': 'secretId'},
+              'RotateSecret': {'type': 'config_change', 'service_field': 'secretId'},
+              'PutSecretValue': {'type': 'config_change', 'service_field': 'secretId'},
+              
+              # CloudFormation
+              'CreateStack': {'type': 'deployment', 'service_field': 'stackName'},
+              'UpdateStack': {'type': 'deployment', 'service_field': 'stackName'},
+              'DeleteStack': {'type': 'deployment', 'service_field': 'stackName'},
+              
+              # AppConfig
+              'StartDeployment': {'type': 'deployment', 'service_field': 'applicationId'},
+              
+              # RDS
+              'ModifyDBInstance': {'type': 'config_change', 'service_field': 'dBInstanceIdentifier'},
+              'ModifyDBCluster': {'type': 'config_change', 'service_field': 'dBClusterIdentifier'},
+              
+              # ElastiCache
+              'ModifyCacheCluster': {'type': 'config_change', 'service_field': 'cacheClusterId'},
+              'ModifyReplicationGroup': {'type': 'config_change', 'service_field': 'replicationGroupId'},
+              
+              # EC2 Auto Scaling
+              'UpdateAutoScalingGroup': {'type': 'config_change', 'service_field': 'autoScalingGroupName'},
+              
+              # API Gateway
+              'CreateDeployment': {'type': 'deployment', 'service_field': 'restApiId'},
+          }
+
+          def lambda_handler(event, context):
+              print(f"Received event: {json.dumps(event)}")
+              
+              records_processed = 0
+              
+              for record in event.get('detail', {}).get('records', [event]):
+                  # Handle both direct EventBridge and batched events
+                  detail = record if 'eventName' in record else event.get('detail', {})
+                  
+                  event_name = detail.get('eventName', '')
+                  event_source = detail.get('eventSource', '')
+                  
+                  if event_name not in DEPLOYMENT_EVENTS:
+                      print(f"Skipping non-deployment event: {event_name}")
+                      continue
+                  
+                  config = DEPLOYMENT_EVENTS[event_name]
+                  request_params = detail.get('requestParameters', {}) or {}
+                  response = detail.get('responseElements', {}) or {}
+                  user_identity = detail.get('userIdentity', {})
+                  
+                  # Extract service name
+                  service_field = config['service_field']
+                  service = request_params.get(service_field, '')
+                  
+                  # Handle nested service names (e.g., ECS service ARN)
+                  if '/' in str(service):
+                      service = service.split('/')[-1]
+                  if ':' in str(service):
+                      service = service.split(':')[-1]
+                  
+                  if not service:
+                      service = f"unknown-{event_source.split('.')[0]}"
+                  
+                  # Generate unique deployment ID
+                  timestamp = detail.get('eventTime', datetime.utcnow().isoformat() + 'Z')
+                  event_id = detail.get('eventID', '')
+                  deployment_id = f"{config['type'][:6]}-{service[:20]}-{hashlib.md5((event_id + timestamp).encode()).hexdigest()[:8]}"
+                  
+                  # Extract deployer info
+                  deployer = user_identity.get('userName', '')
+                  if not deployer:
+                      deployer = user_identity.get('principalId', '').split(':')[-1]
+                  if not deployer:
+                      arn = user_identity.get('arn', '')
+                      if 'assumed-role' in arn:
+                          deployer = arn.split('/')[-1]
+                      else:
+                          deployer = 'aws-service'
+                  
+                  # Build the record
+                  item = {
+                      'deployment_id': deployment_id,
+                      'service': service,
+                      'timestamp': timestamp,
+                      'type': config['type'],
+                      'status': 'succeeded' if not detail.get('errorCode') else 'failed',
+                      'deployed_by': deployer,
+                      'source': 'cloudtrail',
+                      'event_name': event_name,
+                      'event_source': event_source,
+                      'aws_region': detail.get('awsRegion', 'us-east-1'),
+                      'request_id': detail.get('requestID', ''),
+                  }
+                  
+                  # Add deployment-specific fields
+                  if config['type'] == 'deployment':
+                      # Try to extract version info
+                      version = response.get('version', '') or response.get('taskDefinitionArn', '').split(':')[-1] if response else ''
+                      item['version'] = str(version) if version else 'latest'
+                      item['changes'] = f"{event_name} on {service}"
+                      
+                      # Lambda specific
+                      if 'lambda' in event_source:
+                          item['commit_sha'] = request_params.get('revisionId', '')[:8] if request_params.get('revisionId') else ''
+                      
+                      # ECS specific
+                      if 'ecs' in event_source:
+                          item['changes'] = f"Task definition update: {request_params.get('taskDefinition', 'unknown')}"
+                  
+                  # Add config_change-specific fields
+                  if config['type'] == 'config_change':
+                      item['parameter'] = service_field
+                      
+                      # Parameter Store specific
+                      if 'ssm' in event_source:
+                          item['parameter'] = request_params.get('name', service)
+                          item['new_value'] = '[REDACTED]'  # Don't store actual values
+                      
+                      # RDS specific
+                      if 'rds' in event_source:
+                          changes = []
+                          for key in ['dBInstanceClass', 'allocatedStorage', 'engineVersion', 'multiAZ']:
+                              if key in request_params:
+                                  changes.append(f"{key}={request_params[key]}")
+                          item['changes'] = ', '.join(changes) if changes else f"Modified {service}"
+                  
+                  # Add error info if failed
+                  if detail.get('errorCode'):
+                      item['status'] = 'failed'
+                      item['error_message'] = detail.get('errorMessage', detail.get('errorCode', ''))
+                  
+                  # Write to DynamoDB
+                  try:
+                      table.put_item(Item=item)
+                      records_processed += 1
+                      print(f"Recorded {config['type']}: {deployment_id} for {service}")
+                  except Exception as e:
+                      print(f"Failed to write record: {e}")
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({'records_processed': records_processed})
+              }
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # IAM Role for Lambda
+  # ─────────────────────────────────────────────────────────────────────────────
+  DeploymentTrackerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub outageshield-deployment-tracker-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DeploymentTrackerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/outageshield-deployments-${Environment}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # EventBridge Rule - Lambda Deployments
+  # ─────────────────────────────────────────────────────────────────────────────
+  LambdaDeploymentRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub outageshield-lambda-deployments-${Environment}
+      Description: Capture Lambda function deployments
+      EventPattern:
+        source:
+          - aws.lambda
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - lambda.amazonaws.com
+          eventName:
+            - UpdateFunctionCode
+            - UpdateFunctionConfiguration
+            - PublishVersion
+      State: ENABLED
+      Targets:
+        - Id: DeploymentTracker
+          Arn: !GetAtt DeploymentTrackerLambda.Arn
+
+  LambdaDeploymentPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DeploymentTrackerLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt LambdaDeploymentRule.Arn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # EventBridge Rule - ECS Deployments
+  # ─────────────────────────────────────────────────────────────────────────────
+  ECSDeploymentRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub outageshield-ecs-deployments-${Environment}
+      Description: Capture ECS service deployments
+      EventPattern:
+        source:
+          - aws.ecs
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - ecs.amazonaws.com
+          eventName:
+            - UpdateService
+            - CreateService
+            - RegisterTaskDefinition
+      State: ENABLED
+      Targets:
+        - Id: DeploymentTracker
+          Arn: !GetAtt DeploymentTrackerLambda.Arn
+
+  ECSDeploymentPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DeploymentTrackerLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ECSDeploymentRule.Arn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # EventBridge Rule - CodeDeploy
+  # ─────────────────────────────────────────────────────────────────────────────
+  CodeDeployRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub outageshield-codedeploy-${Environment}
+      Description: Capture CodeDeploy deployments
+      EventPattern:
+        source:
+          - aws.codedeploy
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - codedeploy.amazonaws.com
+          eventName:
+            - CreateDeployment
+      State: ENABLED
+      Targets:
+        - Id: DeploymentTracker
+          Arn: !GetAtt DeploymentTrackerLambda.Arn
+
+  CodeDeployPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DeploymentTrackerLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CodeDeployRule.Arn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # EventBridge Rule - Parameter Store Changes
+  # ─────────────────────────────────────────────────────────────────────────────
+  ParameterStoreRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub outageshield-parameter-store-${Environment}
+      Description: Capture Parameter Store changes
+      EventPattern:
+        source:
+          - aws.ssm
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - ssm.amazonaws.com
+          eventName:
+            - PutParameter
+            - DeleteParameter
+      State: ENABLED
+      Targets:
+        - Id: DeploymentTracker
+          Arn: !GetAtt DeploymentTrackerLambda.Arn
+
+  ParameterStorePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DeploymentTrackerLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ParameterStoreRule.Arn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # EventBridge Rule - Secrets Manager
+  # ─────────────────────────────────────────────────────────────────────────────
+  SecretsManagerRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub outageshield-secrets-manager-${Environment}
+      Description: Capture Secrets Manager changes
+      EventPattern:
+        source:
+          - aws.secretsmanager
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - secretsmanager.amazonaws.com
+          eventName:
+            - UpdateSecret
+            - RotateSecret
+            - PutSecretValue
+      State: ENABLED
+      Targets:
+        - Id: DeploymentTracker
+          Arn: !GetAtt DeploymentTrackerLambda.Arn
+
+  SecretsManagerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DeploymentTrackerLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SecretsManagerRule.Arn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # EventBridge Rule - CloudFormation
+  # ─────────────────────────────────────────────────────────────────────────────
+  CloudFormationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub outageshield-cloudformation-${Environment}
+      Description: Capture CloudFormation stack changes
+      EventPattern:
+        source:
+          - aws.cloudformation
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - cloudformation.amazonaws.com
+          eventName:
+            - CreateStack
+            - UpdateStack
+            - DeleteStack
+      State: ENABLED
+      Targets:
+        - Id: DeploymentTracker
+          Arn: !GetAtt DeploymentTrackerLambda.Arn
+
+  CloudFormationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DeploymentTrackerLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CloudFormationRule.Arn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # EventBridge Rule - RDS Changes
+  # ─────────────────────────────────────────────────────────────────────────────
+  RDSRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub outageshield-rds-changes-${Environment}
+      Description: Capture RDS configuration changes
+      EventPattern:
+        source:
+          - aws.rds
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - rds.amazonaws.com
+          eventName:
+            - ModifyDBInstance
+            - ModifyDBCluster
+      State: ENABLED
+      Targets:
+        - Id: DeploymentTracker
+          Arn: !GetAtt DeploymentTrackerLambda.Arn
+
+  RDSPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DeploymentTrackerLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt RDSRule.Arn
+
+Outputs:
+  DeploymentTrackerLambdaArn:
+    Description: Deployment Tracker Lambda ARN
+    Value: !GetAtt DeploymentTrackerLambda.Arn
+    Export:
+      Name: !Sub outageshield-deployment-tracker-${Environment}-LambdaArn
+
+  EventRulesCreated:
+    Description: EventBridge rules created
+    Value: !Sub |
+      Lambda: ${LambdaDeploymentRule}
+      ECS: ${ECSDeploymentRule}
+      CodeDeploy: ${CodeDeployRule}
+      ParameterStore: ${ParameterStoreRule}
+      SecretsManager: ${SecretsManagerRule}
+      CloudFormation: ${CloudFormationRule}
+      RDS: ${RDSRule}

@@ -386,3 +386,312 @@ def poll_metrics():
 7. ➕ Add scheduled rule (rate 1 min) for metric polling
 
 Steps 1-4 give you the core pipeline. Steps 5-7 add deeper visibility.
+
+
+---
+
+## 7. CI/CD Deployment Tracking (Push — API Integration)
+
+**How:** Your CI/CD pipelines push deployment and config change events to DynamoDB. The Bedrock Agent queries this data to correlate incidents with recent changes.
+
+```
+CI/CD Pipeline (GitHub Actions, Jenkins, CodePipeline, etc.)
+       │
+       ▼ (your pipeline calls AWS SDK)
+DynamoDB: outageshield-deployments-dev
+       │
+       ▼ (Bedrock Agent queries via checkDeployments tool)
+Incident correlation with recent deployments
+```
+
+### DynamoDB Table Schema
+
+**Table:** `outageshield-deployments-dev`
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `deployment_id` | String (PK) | Unique ID (e.g., `deploy-checkout-abc123`) |
+| `service` | String (GSI-PK) | Service name (e.g., `checkout-service`) |
+| `timestamp` | String (GSI-SK) | ISO 8601 timestamp (e.g., `2024-01-15T10:30:00Z`) |
+| `type` | String | `deployment` or `config_change` |
+| `version` | String | New version (for deployments) |
+| `previous_version` | String | Previous version (for deployments) |
+| `status` | String | `succeeded`, `failed`, `in_progress` |
+| `changes` | String | Description of changes |
+| `commit_sha` | String | Git commit SHA |
+| `deployed_by` | String | User or system that deployed |
+| `pipeline` | String | CI/CD pipeline name |
+| `environment` | String | `production`, `staging`, `dev` |
+| `parameter` | String | Config parameter name (for config_change) |
+| `old_value` | String | Previous value (for config_change) |
+| `new_value` | String | New value (for config_change) |
+| `changed_by` | String | User or system that made the change |
+| `source` | String | Source system (e.g., `terraform`, `aws-config`) |
+
+### GitHub Actions Integration
+
+Add this step to your deployment workflow:
+
+```yaml
+# .github/workflows/deploy.yml
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to Production
+        run: |
+          # Your deployment commands here
+          ./deploy.sh
+
+      - name: Track Deployment in OutageShield
+        if: success()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: us-east-1
+        run: |
+          DEPLOYMENT_ID="deploy-${{ github.event.repository.name }}-$(date +%s)"
+          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          
+          aws dynamodb put-item \
+            --table-name outageshield-deployments-dev \
+            --item '{
+              "deployment_id": {"S": "'$DEPLOYMENT_ID'"},
+              "service": {"S": "${{ github.event.repository.name }}"},
+              "timestamp": {"S": "'$TIMESTAMP'"},
+              "type": {"S": "deployment"},
+              "version": {"S": "${{ github.sha }}"},
+              "previous_version": {"S": "${{ github.event.before }}"},
+              "status": {"S": "succeeded"},
+              "changes": {"S": "${{ github.event.head_commit.message }}"},
+              "commit_sha": {"S": "${{ github.sha }}"},
+              "deployed_by": {"S": "${{ github.actor }}"},
+              "pipeline": {"S": "${{ github.workflow }}"},
+              "environment": {"S": "production"}
+            }'
+```
+
+### Jenkins Integration
+
+```groovy
+// Jenkinsfile
+pipeline {
+    agent any
+    
+    environment {
+        SERVICE_NAME = 'checkout-service'
+        AWS_REGION = 'us-east-1'
+    }
+    
+    stages {
+        stage('Deploy') {
+            steps {
+                sh './deploy.sh'
+            }
+        }
+        
+        stage('Track Deployment') {
+            steps {
+                script {
+                    def deploymentId = "deploy-${SERVICE_NAME}-${BUILD_NUMBER}"
+                    def timestamp = new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'", TimeZone.getTimeZone('UTC'))
+                    
+                    sh """
+                        aws dynamodb put-item \
+                            --table-name outageshield-deployments-dev \
+                            --region ${AWS_REGION} \
+                            --item '{
+                                "deployment_id": {"S": "${deploymentId}"},
+                                "service": {"S": "${SERVICE_NAME}"},
+                                "timestamp": {"S": "${timestamp}"},
+                                "type": {"S": "deployment"},
+                                "version": {"S": "${GIT_COMMIT}"},
+                                "status": {"S": "succeeded"},
+                                "changes": {"S": "Build #${BUILD_NUMBER}"},
+                                "commit_sha": {"S": "${GIT_COMMIT}"},
+                                "deployed_by": {"S": "jenkins"},
+                                "pipeline": {"S": "${JOB_NAME}"},
+                                "environment": {"S": "production"}
+                            }'
+                    """
+                }
+            }
+        }
+    }
+}
+```
+
+### AWS CodePipeline Integration
+
+Add a Lambda action to your pipeline:
+
+```python
+# lambda: track-deployment
+import boto3
+import json
+from datetime import datetime
+
+dynamodb = boto3.resource('dynamodb')
+table = dynamodb.Table('outageshield-deployments-dev')
+codepipeline = boto3.client('codepipeline')
+
+def lambda_handler(event, context):
+    job_id = event['CodePipeline.job']['id']
+    
+    try:
+        # Extract deployment info from CodePipeline event
+        user_params = json.loads(
+            event['CodePipeline.job']['data']['actionConfiguration']['configuration']['UserParameters']
+        )
+        
+        service = user_params.get('service', 'unknown')
+        version = user_params.get('version', 'unknown')
+        
+        # Record deployment
+        table.put_item(Item={
+            'deployment_id': f"deploy-{service}-{context.aws_request_id[:8]}",
+            'service': service,
+            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'type': 'deployment',
+            'version': version,
+            'status': 'succeeded',
+            'deployed_by': 'codepipeline',
+            'pipeline': event['CodePipeline.job']['data']['pipelineContext']['pipelineName'],
+            'environment': 'production'
+        })
+        
+        codepipeline.put_job_success_result(jobId=job_id)
+        
+    except Exception as e:
+        codepipeline.put_job_failure_result(
+            jobId=job_id,
+            failureDetails={'type': 'JobFailed', 'message': str(e)}
+        )
+
+```
+
+### Terraform Integration
+
+Track config changes from Terraform:
+
+```hcl
+# terraform/main.tf
+
+resource "null_resource" "track_config_change" {
+  triggers = {
+    max_connections = var.max_connections
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      aws dynamodb put-item \
+        --table-name outageshield-deployments-dev \
+        --region us-east-1 \
+        --item '{
+          "deployment_id": {"S": "config-${var.service_name}-${timestamp()}"},
+          "service": {"S": "${var.service_name}"},
+          "timestamp": {"S": "${timestamp()}"},
+          "type": {"S": "config_change"},
+          "parameter": {"S": "max_connections"},
+          "old_value": {"S": "${self.triggers.max_connections}"},
+          "new_value": {"S": "${var.max_connections}"},
+          "changed_by": {"S": "terraform"},
+          "source": {"S": "terraform"}
+        }'
+    EOT
+  }
+}
+```
+
+### Python SDK Example
+
+```python
+import boto3
+from datetime import datetime
+import uuid
+
+def track_deployment(service: str, version: str, changes: str, deployed_by: str = 'manual'):
+    """Track a deployment in OutageShield."""
+    dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+    table = dynamodb.Table('outageshield-deployments-dev')
+    
+    table.put_item(Item={
+        'deployment_id': f"deploy-{service[:8]}-{uuid.uuid4().hex[:8]}",
+        'service': service,
+        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'type': 'deployment',
+        'version': version,
+        'status': 'succeeded',
+        'changes': changes,
+        'deployed_by': deployed_by,
+        'environment': 'production'
+    })
+
+def track_config_change(service: str, parameter: str, old_value: str, new_value: str, changed_by: str = 'manual'):
+    """Track a config change in OutageShield."""
+    dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+    table = dynamodb.Table('outageshield-deployments-dev')
+    
+    table.put_item(Item={
+        'deployment_id': f"config-{service[:8]}-{uuid.uuid4().hex[:8]}",
+        'service': service,
+        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'type': 'config_change',
+        'parameter': parameter,
+        'old_value': old_value,
+        'new_value': new_value,
+        'changed_by': changed_by,
+        'source': 'python-sdk'
+    })
+
+# Usage
+track_deployment('checkout-service', 'v2.5.0', 'Added retry logic for payment failures')
+track_config_change('checkout-service', 'timeout_seconds', '30', '60', 'ops-team')
+```
+
+### How the Agent Uses This Data
+
+When an incident occurs, the Bedrock Agent calls `checkDeployments` with the affected service name. The agent-actions Lambda queries the deployments table:
+
+```python
+# Agent queries last 24 hours of deployments for the service
+response = table.query(
+    IndexName='service-timestamp-index',
+    KeyConditionExpression=Key('service').eq(service) & Key('timestamp').gte(cutoff),
+    ScanIndexForward=False,  # Most recent first
+    Limit=10
+)
+```
+
+The agent then correlates:
+- **Recent deployments** → "A deployment 2 hours ago changed connection pool settings"
+- **Config changes** → "max_connections was increased from 50 to 100"
+- **Timing** → "The incident started 30 minutes after the deployment"
+
+This correlation feeds into the Remediation Lambda, which generates recommendations like:
+> "Rollback the deployment of checkout-service to the previous version to revert the connection pool settings change."
+
+---
+
+## Summary: All Data Sources
+
+| Source | Method | Table/Index | Used By |
+|--------|--------|-------------|---------|
+| CloudWatch Alarms | Push (EventBridge) | `outageshield-events-dev` | Detection Lambda |
+| CloudTrail | Push (EventBridge) | `outageshield-events-dev` | Detection Lambda |
+| AWS Config | Push (EventBridge) | `outageshield-events-dev` | Detection Lambda |
+| CloudWatch Logs | Push (Subscription) | `outageshield-events-dev` | Detection Lambda |
+| X-Ray Traces | Pull (scheduled) | `outageshield-events-dev` | Detection Lambda |
+| CloudWatch Metrics | Pull (scheduled) | `outageshield-events-dev` | Detection Lambda |
+| **CI/CD Deployments** | **Push (SDK)** | **`outageshield-deployments-dev`** | **Bedrock Agent** |
+| Past Incidents | — | `outageshield-incidents-dev` | Bedrock Agent |
+| Runbooks | — | `outageshield-runbooks-dev` | Bedrock Agent |
+| Logs (search) | — | OpenSearch `outageshield-logs` | Bedrock Agent |

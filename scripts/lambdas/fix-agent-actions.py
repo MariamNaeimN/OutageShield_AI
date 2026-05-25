@@ -1,4 +1,4 @@
-"""Fix the agent-actions Lambda with correct code."""
+"""Update the agent-actions Lambda to use real deployment data from DynamoDB."""
 import boto3, zipfile, io
 
 lambda_client = boto3.client('lambda', region_name='us-east-1')
@@ -6,12 +6,14 @@ lambda_client = boto3.client('lambda', region_name='us-east-1')
 code = '''import json
 import boto3
 import os
-from boto3.dynamodb.conditions import Attr
+from boto3.dynamodb.conditions import Attr, Key
+from datetime import datetime, timedelta
 
 dynamodb = boto3.resource('dynamodb')
 INCIDENTS_TABLE = os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev')
 EVENTS_TABLE = os.environ.get('EVENTS_TABLE', 'outageshield-events-dev')
 RUNBOOKS_TABLE = os.environ.get('RUNBOOKS_TABLE', 'outageshield-runbooks-dev')
+DEPLOYMENTS_TABLE = os.environ.get('DEPLOYMENTS_TABLE', 'outageshield-deployments-dev')
 OPENSEARCH_ENDPOINT = os.environ.get('OPENSEARCH_ENDPOINT', '')
 
 def lambda_handler(event, context):
@@ -54,9 +56,8 @@ def search_incident_history(params):
     table = dynamodb.Table(INCIDENTS_TABLE)
     response = table.scan(FilterExpression=Attr('service').eq(service), Limit=10)
     incidents = response.get('Items', [])
-    # Sort by created_at descending and skip the first one (most recent = current incident)
     incidents_sorted = sorted(incidents, key=lambda x: x.get('created_at', ''), reverse=True)
-    past_incidents = incidents_sorted[1:]  # Skip the most recent one
+    past_incidents = incidents_sorted[1:]  # Skip the most recent one (current incident)
     return {
         'service': service,
         'total_past_incidents': len(past_incidents),
@@ -97,8 +98,6 @@ def search_logs(params):
                 connection_class=RequestsHttpConnection
             )
             
-            # Hybrid search: keyword match on service OR alarm_name + text relevance on message
-            # Also search incident correlations stored in OpenSearch
             query = {
                 "query": {
                     "bool": {
@@ -153,31 +152,78 @@ def get_runbook(params):
     return {'service': service, 'alarm_type': alarm_type, 'runbook': {'title': f'General Runbook for {service}', 'description': 'Default runbook', 'steps': ['Review CloudWatch metrics', 'Check recent deployments', 'Review application logs', 'Check downstream dependencies', 'Escalate to service owner'], 'category': 'manual_intervention', 'estimated_ttr': 'Unknown', 'severity_threshold': 3}}
 
 def check_deployments(params):
+    """Query real deployment data from DynamoDB deployments table."""
     service = params.get('service', '')
-    svc_short = service.replace('-', '_')[:12]
-    import datetime
-    ts = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+    hours_back = int(params.get('hours_back', 24))
+    
+    table = dynamodb.Table(DEPLOYMENTS_TABLE)
+    
+    # Calculate time window - use a format that works with the stored timestamps
+    now = datetime.utcnow()
+    cutoff = (now - timedelta(hours=hours_back)).strftime('%Y-%m-%dT%H:%M:%S')
+    
+    print(f"Querying deployments for {service} since {cutoff}")
+    
+    deployments = []
+    config_changes = []
+    
+    try:
+        # Query by service using GSI
+        response = table.query(
+            IndexName='service-timestamp-index',
+            KeyConditionExpression=Key('service').eq(service) & Key('timestamp').gte(cutoff),
+            ScanIndexForward=False,  # Most recent first
+            Limit=10
+        )
+        items = response.get('Items', [])
+        
+        print(f"Found {len(items)} items for {service}")
+        
+        for item in items:
+            record_type = item.get('type', 'deployment')
+            
+            if record_type == 'config_change':
+                config_changes.append({
+                    'change_id': item.get('deployment_id', ''),
+                    'parameter': item.get('parameter', ''),
+                    'old_value': item.get('old_value', ''),
+                    'new_value': item.get('new_value', ''),
+                    'timestamp': item.get('timestamp', ''),
+                    'service': item.get('service', service),
+                    'changed_by': item.get('changed_by', 'unknown'),
+                    'source': item.get('source', 'unknown'),
+                    'reason': item.get('reason', '')
+                })
+            else:
+                deployments.append({
+                    'deployment_id': item.get('deployment_id', ''),
+                    'version': item.get('version', ''),
+                    'previous_version': item.get('previous_version', ''),
+                    'timestamp': item.get('timestamp', ''),
+                    'status': item.get('status', 'unknown'),
+                    'changes': item.get('changes', ''),
+                    'commit_sha': item.get('commit_sha', ''),
+                    'deployed_by': item.get('deployed_by', 'unknown'),
+                    'pipeline': item.get('pipeline', 'unknown'),
+                    'environment': item.get('environment', 'unknown'),
+                    'error_message': item.get('error_message', '')
+                })
+        
+        print(f"Parsed {len(deployments)} deployments and {len(config_changes)} config changes for {service}")
+        
+    except Exception as e:
+        print(f"Deployment query failed: {e}")
+        import traceback
+        traceback.print_exc()
+    
     return {
         'service': service,
-        'recent_deployments': [
-            {
-                'deployment_id': f'deploy-{svc_short}-001',
-                'version': '2.4.1',
-                'timestamp': '2024-01-15T10:30:00Z',
-                'status': 'succeeded',
-                'changes': f'Updated connection pool settings for {service}'
-            }
-        ],
-        'config_changes': [
-            {
-                'change_id': f'config-{svc_short}-001',
-                'parameter': 'max_connections',
-                'old_value': '50',
-                'new_value': '100',
-                'timestamp': '2024-01-15T09:00:00Z',
-                'service': service
-            }
-        ]
+        'time_window_hours': hours_back,
+        'total_deployments': len(deployments),
+        'total_config_changes': len(config_changes),
+        'recent_deployments': deployments,
+        'config_changes': config_changes,
+        'data_source': 'DynamoDB (outageshield-deployments-dev)'
     }
 '''
 
@@ -189,3 +235,49 @@ zip_buffer.seek(0)
 print("Updating agent-actions Lambda...")
 r = lambda_client.update_function_code(FunctionName='outageshield-agent-actions-dev', ZipFile=zip_buffer.read())
 print(f"✓ Updated! Last modified: {r['LastModified']}")
+
+# Add DEPLOYMENTS_TABLE env var
+print("Adding DEPLOYMENTS_TABLE environment variable...")
+try:
+    config = lambda_client.get_function_configuration(FunctionName='outageshield-agent-actions-dev')
+    env_vars = config.get('Environment', {}).get('Variables', {})
+    env_vars['DEPLOYMENTS_TABLE'] = 'outageshield-deployments-dev'
+    lambda_client.update_function_configuration(
+        FunctionName='outageshield-agent-actions-dev',
+        Environment={'Variables': env_vars}
+    )
+    print("✓ Environment variable added!")
+except Exception as e:
+    print(f"Note: Could not update env var: {e}")
+
+print("\n✅ Agent actions Lambda updated to use real deployment data from DynamoDB!")
+print("\nDeployment record schema:")
+print("""
+{
+    "deployment_id": "deploy-checkout-001",      # Primary key
+    "service": "checkout-service",               # GSI partition key
+    "timestamp": "2024-01-15T10:30:00Z",         # GSI sort key
+    "type": "deployment",                        # "deployment" or "config_change"
+    "version": "2.4.1",
+    "previous_version": "2.4.0",
+    "status": "succeeded",
+    "changes": "Updated connection pool settings",
+    "commit_sha": "abc123",
+    "deployed_by": "jenkins",
+    "pipeline": "checkout-ci-cd",
+    "environment": "production"
+}
+
+Config change record:
+{
+    "deployment_id": "config-checkout-001",
+    "service": "checkout-service",
+    "timestamp": "2024-01-15T09:00:00Z",
+    "type": "config_change",
+    "parameter": "max_connections",
+    "old_value": "50",
+    "new_value": "100",
+    "changed_by": "terraform",
+    "source": "aws-config"
+}
+""")

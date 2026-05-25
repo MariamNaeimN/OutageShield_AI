@@ -18,7 +18,8 @@ INCIDENTS_TABLE = os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev'
 
 def clean_investigation(text):
     """Strip trailing Remediation Summary / recommended_actions sections.
-    Also convert XML-style section tags to [Source: X] format for consistent parsing."""
+    Also convert XML-style section tags to [Source: X] format for consistent parsing.
+    Aggressively truncate anything after Deployment History findings."""
     import re
     # Convert XML section tags to [Source: X] markers
     text = re.sub(r'<investigation_summary>', '', text, flags=re.IGNORECASE)
@@ -39,6 +40,21 @@ def clean_investigation(text):
     text = re.sub(r'\s*[Rr]emediation[_ ][Ss]ummary:[\s\S]*$', '', text).strip()
     # Remove trailing 'recommended_actions:' block if present
     text = re.sub(r'\s*recommended_actions:[\s\S]*$', '', text).strip()
+    # Remove 'Recommended Actions:' section and everything after
+    text = re.sub(r'\s*[Rr]ecommended [Aa]ctions?:[\s\S]*$', '', text).strip()
+    # Remove 'Next Steps:' section and everything after
+    text = re.sub(r'\s*[Nn]ext [Ss]teps?:[\s\S]*$', '', text).strip()
+    # Remove 'Summary:' section at the end
+    text = re.sub(r'\s*[Ss]ummary:[\s\S]*$', '', text).strip()
+    # Remove 'In summary' or 'To summarize' conclusions
+    text = re.sub(r'\s*[Ii]n summary[\s\S]*$', '', text).strip()
+    text = re.sub(r'\s*[Tt]o summarize[\s\S]*$', '', text).strip()
+    # Remove 'Based on the findings' conclusions
+    text = re.sub(r'\s*[Bb]ased on the (findings|investigation)[\s\S]*$', '', text).strip()
+    # Remove 'This concludes' endings
+    text = re.sub(r'\s*[Tt]his concludes[\s\S]*$', '', text).strip()
+    # Remove 'I have completed/provided/finished' endings
+    text = re.sub(r'\s*I have (now )?(completed|provided|finished)[\s\S]*$', '', text).strip()
     return text
 
 def lambda_handler(event, context):
@@ -51,15 +67,48 @@ def lambda_handler(event, context):
     root_causes = step3.get('root_causes', [])
     root_cause = root_causes[0].get('description', 'Unknown') if root_causes else 'Unknown'
 
-    prompt = (
-        f"Investigate the incident on service {service}. "
-        f"The alarm is {alarm_name}. "
-        f"Initial root cause analysis suggests: {root_cause}. "
-        f"Search for similar past incidents, check logs, look up the runbook, "
-        f"and check recent deployments. Provide a full investigation summary. "
-        f"IMPORTANT: Do NOT include a 'Remediation Summary' section or 'recommended_actions' — "
-        f"stop after the deployment correlation findings."
-    )
+    prompt = f"""You are an incident investigation agent.
+Your task is to perform a structured investigation ONLY.
+You MUST NOT include any remediation, recommendations, summaries, or next steps.
+
+STRICT OUTPUT RULES:
+- You MUST include ALL 4 source sections in your output, even if a tool returns no data.
+- Do NOT skip any section. If a tool returns no data, write "No relevant data found" for that section.
+- Do NOT add any extra sections.
+- Do NOT include "Remediation Summary", "Recommended Actions", "Next Steps", or similar content.
+- Your response MUST end immediately after the Deployment History findings.
+- Any content after Deployment History findings is INVALID.
+
+REQUIRED TOOL EXECUTION ORDER (DO NOT SKIP ANY):
+1) searchIncidentHistory → report under [Source: Incident History DB]
+2) searchLogs (time_range=6h) → report under [Source: OpenSearch Logs]
+3) getRunbook → report under [Source: Runbook DB]
+4) checkDeployments → report under [Source: Deployment History]
+
+OUTPUT FORMAT (STRICT - ALL 4 SECTIONS REQUIRED):
+[Source: Incident History DB]
+<findings or "No relevant data found">
+
+[Source: OpenSearch Logs]
+<findings or "No relevant data found">
+
+[Source: Runbook DB]
+<findings or "No relevant data found">
+
+[Source: Deployment History]
+<findings or "No relevant data found">
+
+CRITICAL RULES:
+- You MUST call ALL 4 tools and include ALL 4 sections.
+- STOP WRITING immediately after Deployment History section.
+- Do NOT explain, summarize, or conclude.
+- Do NOT generate remediation under any form.
+- Do NOT skip sections even if they have no data.
+
+Context:
+- Service: {service}
+- Alarm: {alarm_name}
+- Initial suspected root cause: {root_cause}"""
 
     try:
         response = bedrock_agent.invoke_agent(

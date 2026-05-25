@@ -32,6 +32,15 @@ export interface Incident {
   ticket?: { id: string; system: string; status: string }
   workflowStep: string
   workflowId?: string
+  // Raw fields from DynamoDB for detail page
+  notifications?: string
+  ticket_content?: string
+  revenue_at_risk?: string
+  affected_users?: string | number
+  sla_status?: string
+  ticket_url?: string
+  agent_investigation?: string
+  remediation_summary?: string
 }
 
 export interface Recommendation {
@@ -211,7 +220,7 @@ function mapIncident(raw: any): Incident {
   // Debug: log raw root cause field so we can see what's coming from the API
   // console.log('[mapIncident] root_cause raw:', JSON.stringify(rawRootCause).slice(0, 200), '| parsed:', !!parsed)
 
-  return {
+  const result: Incident = {
     id: raw.incident_id || raw.id || '',
     service: raw.service || '',
     title: raw.title || '',
@@ -234,7 +243,14 @@ function mapIncident(raw: any): Incident {
     ticket_url: raw.ticket_url,
     agent_investigation: raw.agent_investigation,
     remediation_summary: raw.remediation_summary
-  } as Incident & { notifications?: string; ticket_content?: string; revenue_at_risk?: string; affected_users?: string; sla_status?: string; ticket_url?: string; agent_investigation?: string }
+  }
+  
+  // Debug: log notifications field
+  if (result.notifications) {
+    console.log(`[mapIncident] ${result.id} has notifications:`, typeof result.notifications, String(result.notifications).slice(0, 50))
+  }
+  
+  return result
 }
 
 function parseRecommendations(raw: unknown): Recommendation[] {
@@ -249,7 +265,8 @@ function parseRecommendations(raw: unknown): Recommendation[] {
   }
   // Filter out RCA entries (they have description+confidence+evidence but no category)
   // Only return actual recommendations that have a category field
-  return parsed.filter(item => item.category && ['rollback', 'scaling', 'configuration_change', 'manual_intervention'].includes(item.category))
+  const validCategories = ['rollback', 'scaling', 'configuration_change', 'manual_intervention', 'manual', 'config']
+  return parsed.filter(item => item.category && validCategories.includes(item.category))
 }
 
 export async function getIncidentById(id: string): Promise<Incident> {
