@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Bell, Ticket, ChevronRight, ExternalLink, Zap } from 'lucide-react'
+import { Bell, Ticket, ChevronRight, ChevronDown, ChevronUp, ExternalLink, Zap, Clock, Server, AlertTriangle, User } from 'lucide-react'
 import { getActiveIncidents } from '../services/api'
 
 const JIRA_BASE_URL = 'https://corpinfollc.atlassian.net'
@@ -242,12 +242,14 @@ export default function Notifications() {
 
 function ExpandableTicket({ ticket }: { ticket: TicketRecord }) {
   const navigate = useNavigate()
+  const [expanded, setExpanded] = useState(false)
   const jiraUrl = `${JIRA_BASE_URL}/browse/${ticket.ticket_id}`
 
   return (
-    <div className="bg-[#161b22] border border-gray-800 rounded-xl overflow-hidden hover:border-blue-800/50 hover-lift transition-all duration-200">
+    <div className="bg-[#161b22] border border-gray-800 rounded-xl overflow-hidden hover:border-blue-800/50 transition-all duration-200">
+      {/* Header Row */}
       <div className="flex items-center justify-between px-4 py-3">
-        <div className="flex items-center gap-4 min-w-0 flex-1 cursor-pointer" onClick={() => navigate(`/tickets/${ticket.incident_id}`)}>
+        <div className="flex items-center gap-4 min-w-0 flex-1 cursor-pointer" onClick={() => setExpanded(!expanded)}>
           <div className="w-8 h-8 bg-blue-900/30 rounded-lg flex items-center justify-center flex-shrink-0">
             <Ticket className="w-4 h-4 text-blue-400" />
           </div>
@@ -255,12 +257,6 @@ function ExpandableTicket({ ticket }: { ticket: TicketRecord }) {
             <div className="flex items-center gap-2 flex-wrap">
               <span className="text-sm font-medium text-blue-400">{ticket.ticket_id}</span>
               <span className="text-xs text-gray-500">— {ticket.system}</span>
-              {ticket.pagerduty_id && (
-                <>
-                  <span className="text-xs text-gray-600">+</span>
-                  <span className="text-sm font-medium text-green-400">{ticket.pagerduty_id}</span>
-                </>
-              )}
               <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${ticket.priority === 'Critical' ? 'bg-red-900/50 text-red-300' : 'bg-orange-900/50 text-orange-300'}`}>
                 {ticket.priority}
               </span>
@@ -281,50 +277,168 @@ function ExpandableTicket({ ticket }: { ticket: TicketRecord }) {
           >
             <ExternalLink className="w-4 h-4" />
           </a>
-          {ticket.pagerduty_url && (
-            <a
-              href={ticket.pagerduty_url}
-              target="_blank"
-              rel="noreferrer"
-              onClick={(e) => e.stopPropagation()}
-              className="p-1.5 rounded-md hover:bg-green-900/30 text-gray-500 hover:text-green-400 transition-colors"
-              title="Open in PagerDuty"
-            >
-              <Zap className="w-4 h-4" />
-            </a>
-          )}
-          <ChevronRight className="w-4 h-4 text-gray-600 cursor-pointer" onClick={() => navigate(`/tickets/${ticket.incident_id}`)} />
+          <button onClick={() => setExpanded(!expanded)} className="p-1 text-gray-500 hover:text-gray-300">
+            {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </button>
         </div>
       </div>
+
+      {/* Expanded Details */}
+      {expanded && (
+        <div className="px-4 pb-4 pt-2 border-t border-gray-800/50 animate-fade-in-up">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="p-3 rounded-lg bg-gray-800/30 border border-gray-700/30">
+              <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+                <Ticket className="w-3 h-3" />
+                <span>Ticket ID</span>
+              </div>
+              <p className="text-sm font-medium text-blue-400">{ticket.ticket_id}</p>
+            </div>
+            <div className="p-3 rounded-lg bg-gray-800/30 border border-gray-700/30">
+              <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+                <Server className="w-3 h-3" />
+                <span>Service</span>
+              </div>
+              <p className="text-sm font-medium text-white">{ticket.service}</p>
+            </div>
+            <div className="p-3 rounded-lg bg-gray-800/30 border border-gray-700/30">
+              <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+                <AlertTriangle className="w-3 h-3" />
+                <span>Priority</span>
+              </div>
+              <p className={`text-sm font-medium ${ticket.priority === 'Critical' ? 'text-red-400' : 'text-orange-400'}`}>{ticket.priority}</p>
+            </div>
+            <div className="p-3 rounded-lg bg-gray-800/30 border border-gray-700/30">
+              <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+                <Clock className="w-3 h-3" />
+                <span>Status</span>
+              </div>
+              <p className="text-sm font-medium text-green-400">{ticket.status}</p>
+            </div>
+          </div>
+          <div className="mt-3 p-3 rounded-lg bg-gray-800/30 border border-gray-700/30">
+            <p className="text-xs text-gray-500 mb-1">Summary</p>
+            <p className="text-sm text-gray-300">{ticket.summary}</p>
+          </div>
+          <div className="mt-3 flex gap-2">
+            <a
+              href={jiraUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-2 px-3 py-2 rounded-lg bg-blue-900/30 text-blue-400 text-xs font-medium hover:bg-blue-900/50 transition-colors"
+            >
+              <ExternalLink className="w-3 h-3" />
+              Open in Jira
+            </a>
+            <button
+              onClick={() => navigate(`/incidents/${ticket.incident_id}`)}
+              className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-800/50 text-gray-300 text-xs font-medium hover:bg-gray-700/50 transition-colors"
+            >
+              <ChevronRight className="w-3 h-3" />
+              View Incident
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
 function ExpandableNotification({ notif }: { notif: NotificationRecord }) {
   const navigate = useNavigate()
+  const [expanded, setExpanded] = useState(false)
+
   return (
-    <div className="bg-[#161b22] border border-gray-800 rounded-xl overflow-hidden cursor-pointer hover:border-purple-800/50 hover-lift transition-all duration-200" onClick={() => navigate(`/sns/${notif.incident_id}`)}>
-      <div className="flex items-center justify-between px-4 py-3">
+    <div className="bg-[#161b22] border border-gray-800 rounded-xl overflow-hidden hover:border-purple-800/50 transition-all duration-200">
+      {/* Header Row */}
+      <div className="flex items-center justify-between px-4 py-3 cursor-pointer" onClick={() => setExpanded(!expanded)}>
         <div className="flex items-center gap-4">
-          <span className={`px-2 py-0.5 rounded text-xs font-bold ${notif.type === 'escalation' ? 'bg-red-900/50 text-red-300' : 'bg-blue-900/50 text-blue-300'}`}>
-            {notif.type}
-          </span>
-          <span className="text-sm text-gray-300">{notif.channel}</span>
-          <span className="text-sm text-gray-400">{notif.recipient}</span>
-          <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-900/30 text-green-300">{notif.status}</span>
-          {notif.subject && <span className="text-xs text-gray-500 hidden md:inline">{notif.subject}</span>}
+          <div className="w-8 h-8 bg-purple-900/30 rounded-lg flex items-center justify-center flex-shrink-0">
+            <Bell className="w-4 h-4 text-purple-400" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className={`px-2 py-0.5 rounded text-xs font-bold ${notif.type === 'escalation' ? 'bg-red-900/50 text-red-300' : 'bg-blue-900/50 text-blue-300'}`}>
+                {notif.type}
+              </span>
+              <span className="text-sm text-gray-300">{notif.channel}</span>
+              <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-900/30 text-green-300">{notif.status}</span>
+            </div>
+            <p className="text-xs text-gray-400 mt-0.5">{notif.recipient}</p>
+          </div>
         </div>
         <div className="flex items-center gap-3">
+          <span className="text-xs text-gray-500">{notif.service}</span>
           <span className="text-xs text-gray-600">{notif.sent_at ? new Date(notif.sent_at).toLocaleTimeString() : ''}</span>
-          <ChevronRight className="w-4 h-4 text-gray-600" />
+          <button className="p-1 text-gray-500 hover:text-gray-300">
+            {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </button>
         </div>
       </div>
+
+      {/* Expanded Details */}
+      {expanded && (
+        <div className="px-4 pb-4 pt-2 border-t border-gray-800/50 animate-fade-in-up">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="p-3 rounded-lg bg-gray-800/30 border border-gray-700/30">
+              <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+                <AlertTriangle className="w-3 h-3" />
+                <span>Type</span>
+              </div>
+              <p className={`text-sm font-medium ${notif.type === 'escalation' ? 'text-red-400' : 'text-blue-400'}`}>{notif.type}</p>
+            </div>
+            <div className="p-3 rounded-lg bg-gray-800/30 border border-gray-700/30">
+              <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+                <Bell className="w-3 h-3" />
+                <span>Channel</span>
+              </div>
+              <p className="text-sm font-medium text-purple-400">{notif.channel}</p>
+            </div>
+            <div className="p-3 rounded-lg bg-gray-800/30 border border-gray-700/30">
+              <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+                <User className="w-3 h-3" />
+                <span>Recipient</span>
+              </div>
+              <p className="text-sm font-medium text-white truncate">{notif.recipient}</p>
+            </div>
+            <div className="p-3 rounded-lg bg-gray-800/30 border border-gray-700/30">
+              <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+                <Clock className="w-3 h-3" />
+                <span>Sent At</span>
+              </div>
+              <p className="text-sm font-medium text-white">{notif.sent_at ? new Date(notif.sent_at).toLocaleString() : 'N/A'}</p>
+            </div>
+          </div>
+          {notif.subject && (
+            <div className="mt-3 p-3 rounded-lg bg-gray-800/30 border border-gray-700/30">
+              <p className="text-xs text-gray-500 mb-1">Subject</p>
+              <p className="text-sm text-white font-medium">{notif.subject}</p>
+            </div>
+          )}
+          {notif.message && (
+            <div className="mt-3 p-3 rounded-lg bg-gray-800/30 border border-gray-700/30">
+              <p className="text-xs text-gray-500 mb-1">Message</p>
+              <pre className="text-xs text-gray-300 whitespace-pre-wrap font-mono leading-relaxed max-h-48 overflow-auto">{notif.message}</pre>
+            </div>
+          )}
+          <div className="mt-3 flex gap-2">
+            <button
+              onClick={() => navigate(`/incidents/${notif.incident_id}`)}
+              className="flex items-center gap-2 px-3 py-2 rounded-lg bg-purple-900/30 text-purple-400 text-xs font-medium hover:bg-purple-900/50 transition-colors"
+            >
+              <ChevronRight className="w-3 h-3" />
+              View Incident
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
 function ExpandablePagerDuty({ incident }: { incident: PagerDutyRecord }) {
   const navigate = useNavigate()
+  const [expanded, setExpanded] = useState(false)
   const severityColors: Record<number, string> = {
     5: 'bg-red-900/50 text-red-300',
     4: 'bg-red-900/40 text-red-300',
@@ -332,11 +446,26 @@ function ExpandablePagerDuty({ incident }: { incident: PagerDutyRecord }) {
     2: 'bg-yellow-900/50 text-yellow-300',
     1: 'bg-blue-900/50 text-blue-300'
   }
+  const severityTextColors: Record<number, string> = {
+    5: 'text-red-400',
+    4: 'text-red-400',
+    3: 'text-orange-400',
+    2: 'text-yellow-400',
+    1: 'text-blue-400'
+  }
+  const pdSeverityMap: Record<number, string> = {
+    5: 'critical',
+    4: 'critical',
+    3: 'error',
+    2: 'warning',
+    1: 'info'
+  }
 
   return (
-    <div className="bg-[#161b22] border border-gray-800 rounded-xl overflow-hidden hover:border-green-800/50 hover-lift transition-all duration-200">
-      <div className="flex items-center justify-between px-4 py-3">
-        <div className="flex items-center gap-4 min-w-0 flex-1 cursor-pointer" onClick={() => navigate(`/incidents/${incident.incident_id}`)}>
+    <div className="bg-[#161b22] border border-gray-800 rounded-xl overflow-hidden hover:border-green-800/50 transition-all duration-200">
+      {/* Header Row */}
+      <div className="flex items-center justify-between px-4 py-3 cursor-pointer" onClick={() => setExpanded(!expanded)}>
+        <div className="flex items-center gap-4 min-w-0 flex-1">
           <div className="w-8 h-8 bg-green-900/30 rounded-lg flex items-center justify-center flex-shrink-0">
             <Zap className="w-4 h-4 text-green-400" />
           </div>
@@ -363,9 +492,75 @@ function ExpandablePagerDuty({ incident }: { incident: PagerDutyRecord }) {
           >
             <ExternalLink className="w-4 h-4" />
           </a>
-          <ChevronRight className="w-4 h-4 text-gray-600 cursor-pointer" onClick={() => navigate(`/incidents/${incident.incident_id}`)} />
+          <button className="p-1 text-gray-500 hover:text-gray-300">
+            {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </button>
         </div>
       </div>
+
+      {/* Expanded Details */}
+      {expanded && (
+        <div className="px-4 pb-4 pt-2 border-t border-gray-800/50 animate-fade-in-up">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="p-3 rounded-lg bg-gray-800/30 border border-gray-700/30">
+              <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+                <Zap className="w-3 h-3" />
+                <span>PagerDuty ID</span>
+              </div>
+              <p className="text-sm font-medium text-green-400">{incident.pagerduty_id}</p>
+            </div>
+            <div className="p-3 rounded-lg bg-gray-800/30 border border-gray-700/30">
+              <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+                <Server className="w-3 h-3" />
+                <span>Service</span>
+              </div>
+              <p className="text-sm font-medium text-white">{incident.service}</p>
+            </div>
+            <div className="p-3 rounded-lg bg-gray-800/30 border border-gray-700/30">
+              <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+                <AlertTriangle className="w-3 h-3" />
+                <span>Severity</span>
+              </div>
+              <p className={`text-sm font-medium ${severityTextColors[incident.severity] || 'text-orange-400'}`}>
+                SEV-{incident.severity} ({pdSeverityMap[incident.severity] || 'error'})
+              </p>
+            </div>
+            <div className="p-3 rounded-lg bg-gray-800/30 border border-gray-700/30">
+              <div className="flex items-center gap-2 text-xs text-gray-500 mb-1">
+                <Clock className="w-3 h-3" />
+                <span>Status</span>
+              </div>
+              <p className="text-sm font-medium text-green-400">{incident.status}</p>
+            </div>
+          </div>
+          <div className="mt-3 p-3 rounded-lg bg-gray-800/30 border border-gray-700/30">
+            <p className="text-xs text-gray-500 mb-1">Incident Summary</p>
+            <p className="text-sm text-gray-300">{incident.summary}</p>
+          </div>
+          <div className="mt-3 p-3 rounded-lg bg-gray-800/30 border border-gray-700/30">
+            <p className="text-xs text-gray-500 mb-1">Linked Incident ID</p>
+            <p className="text-sm text-cyan-400 font-mono">{incident.incident_id}</p>
+          </div>
+          <div className="mt-3 flex gap-2">
+            <a
+              href={incident.pagerduty_url}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-2 px-3 py-2 rounded-lg bg-green-900/30 text-green-400 text-xs font-medium hover:bg-green-900/50 transition-colors"
+            >
+              <ExternalLink className="w-3 h-3" />
+              Open in PagerDuty
+            </a>
+            <button
+              onClick={() => navigate(`/incidents/${incident.incident_id}`)}
+              className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-800/50 text-gray-300 text-xs font-medium hover:bg-gray-700/50 transition-colors"
+            >
+              <ChevronRight className="w-3 h-3" />
+              View Incident
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
