@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Bell, Ticket, ChevronRight, ExternalLink } from 'lucide-react'
+import { Bell, Ticket, ChevronRight, ExternalLink, Zap } from 'lucide-react'
 import { getActiveIncidents } from '../services/api'
 
 const JIRA_BASE_URL = 'https://corpinfollc.atlassian.net'
@@ -28,6 +28,8 @@ interface TicketRecord {
   summary?: string
   incident_id: string
   service: string
+  pagerduty_id?: string
+  pagerduty_url?: string
 }
 
 export default function Notifications() {
@@ -70,7 +72,9 @@ export default function Notifications() {
               created_at: parsed.created_at || '',
               summary: parsed.summary || `Incident on ${inc.service}`,
               incident_id: inc.id,
-              service: inc.service
+              service: inc.service,
+              pagerduty_id: inc.pagerduty_id,
+              pagerduty_url: inc.pagerduty_url
             })
           }
         }
@@ -106,7 +110,7 @@ export default function Notifications() {
     <div className="space-y-6 animate-fade-in-up">
       <div>
         <h2 className="text-2xl font-bold text-white">Notifications & Tickets</h2>
-        <p className="text-sm text-gray-500 mt-1">SNS alerts and Jira tickets created by the agent</p>
+        <p className="text-sm text-gray-500 mt-1">SNS alerts, Jira tickets, and PagerDuty incidents created by the agent</p>
       </div>
 
       {/* Tabs */}
@@ -192,9 +196,15 @@ function ExpandableTicket({ ticket }: { ticket: TicketRecord }) {
             <Ticket className="w-4 h-4 text-blue-400" />
           </div>
           <div className="min-w-0">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <span className="text-sm font-medium text-blue-400">{ticket.ticket_id}</span>
               <span className="text-xs text-gray-500">— {ticket.system}</span>
+              {ticket.pagerduty_id && (
+                <>
+                  <span className="text-xs text-gray-600">+</span>
+                  <span className="text-sm font-medium text-green-400">{ticket.pagerduty_id}</span>
+                </>
+              )}
               <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${ticket.priority === 'Critical' ? 'bg-red-900/50 text-red-300' : 'bg-orange-900/50 text-orange-300'}`}>
                 {ticket.priority}
               </span>
@@ -215,6 +225,18 @@ function ExpandableTicket({ ticket }: { ticket: TicketRecord }) {
           >
             <ExternalLink className="w-4 h-4" />
           </a>
+          {ticket.pagerduty_url && (
+            <a
+              href={ticket.pagerduty_url}
+              target="_blank"
+              rel="noreferrer"
+              onClick={(e) => e.stopPropagation()}
+              className="p-1.5 rounded-md hover:bg-green-900/30 text-gray-500 hover:text-green-400 transition-colors"
+              title="Open in PagerDuty"
+            >
+              <Zap className="w-4 h-4" />
+            </a>
+          )}
           <ChevronRight className="w-4 h-4 text-gray-600 cursor-pointer" onClick={() => navigate(`/tickets/${ticket.incident_id}`)} />
         </div>
       </div>
