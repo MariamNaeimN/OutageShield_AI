@@ -1,15 +1,27 @@
 import { useState, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { useParams, Link, useLocation, useNavigate } from 'react-router-dom'
-import { ArrowLeft, ExternalLink, FileText, ChevronRight, Home, Zap, Clock, Users, DollarSign, AlertTriangle, CheckCircle, ChevronDown, ChevronUp, Target, TrendingUp, Shield, Activity, Server, BookOpen, Bell, X } from 'lucide-react'
+import { ArrowLeft, ExternalLink, FileText, ChevronRight, Home, Zap, Clock, Users, DollarSign, AlertTriangle, CheckCircle, ChevronDown, ChevronUp, Target, TrendingUp, Shield, Activity, Server, BookOpen, Bell, X, History, Search, FileCode, GitBranch, Cpu, Settings, AlertCircle, Info } from 'lucide-react'
 import { getActiveIncidents, type Incident, type RootCauseEntry } from '../services/api'
 
-// Investigation section type
+// Investigation section type with enhanced structure
 interface InvestigationSection {
+  key: string
   title: string
-  icon: string
+  icon: typeof History
   color: string
-  items: string[]
+  bgColor: string
+  borderColor: string
+  items: InvestigationItem[]
+  summary?: string
+}
+
+interface InvestigationItem {
+  type: 'incident' | 'log' | 'runbook' | 'deployment' | 'trace' | 'config' | 'insight' | 'text'
+  title?: string
+  description: string
+  metadata?: Record<string, string | number>
+  severity?: 'critical' | 'warning' | 'info' | 'success'
 }
 
 const JIRA_BASE_URL = 'https://corpinfollc.atlassian.net'
@@ -28,9 +40,14 @@ export default function IncidentDetail() {
     notification: true
   })
   const [showSnsModal, setShowSnsModal] = useState(false)
+  const [expandedInvestigationSections, setExpandedInvestigationSections] = useState<Record<string, boolean>>({})
 
   const toggleSection = (key: string) => {
     setExpandedSections(prev => ({ ...prev, [key]: !prev[key] }))
+  }
+  
+  const toggleInvestigationSection = (key: string) => {
+    setExpandedInvestigationSections(prev => ({ ...prev, [key]: !prev[key] }))
   }
 
   useEffect(() => {
@@ -107,11 +124,12 @@ export default function IncidentDetail() {
   const diffHours = Math.floor(diffMins / 60)
   const timeAgo = diffHours > 0 ? `${diffHours}h ${diffMins % 60}m` : `${diffMins}m`
 
-  // Parse investigation sections
+  // Parse investigation sections with enhanced structure
   const investigationSections: InvestigationSection[] = raw.agent_investigation 
-    ? parseInvestigation(raw.agent_investigation as string)
+    ? parseInvestigationEnhanced(raw.agent_investigation as string)
     : []
   const hasInvestigation: boolean = investigationSections.length > 0
+  const totalInvestigationItems = investigationSections.reduce((sum, s) => sum + s.items.length, 0)
 
   const severityColors: Record<number, { bg: string; text: string; border: string; label: string }> = {
     5: { bg: 'bg-red-500/20', text: 'text-red-400', border: 'border-red-500/40', label: 'Critical' },
@@ -316,34 +334,98 @@ export default function IncidentDetail() {
               ) : null}
             </Card>
           ) : null}
-          {/* Investigation Section */}
+          {/* Investigation Section - Redesigned */}
           {hasInvestigation ? (
             <Card>
               <CardHeader 
                 icon={BookOpen} 
                 title="Technical Investigation" 
-                subtitle={`Bedrock Agent findings from ${investigationSections.length} sources`}
-                badge="AI Agent"
+                subtitle={`AI Agent analyzed ${investigationSections.length} data sources`}
+                badge={`${totalInvestigationItems} findings`}
                 expanded={expandedSections.investigation}
                 onToggle={() => toggleSection('investigation')}
                 color="purple"
               />
               
               {expandedSections.investigation ? (
-                <div className="p-6 pt-0 space-y-3">
-                  {investigationSections.map((section, i) => (
-                    <div key={i} className={`border-l-4 ${section.color} bg-gray-800/30 rounded-r-xl p-4`}>
-                      <div className="flex items-center gap-2 mb-3">
-                        <span className="text-lg">{section.icon}</span>
-                        <span className="text-sm font-semibold text-gray-200">{section.title}</span>
-                      </div>
-                      <div className="space-y-2 pl-7">
-                        {section.items.map((item, j) => (
-                          <p key={j} className="text-sm text-gray-400 leading-relaxed">{item}</p>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
+                <div className="p-6 pt-0">
+                  {/* Investigation Summary Bar */}
+                  <div className="flex flex-wrap gap-2 mb-6 p-4 rounded-xl bg-gray-800/30 border border-gray-700/30">
+                    {investigationSections.map((section) => {
+                      const SectionIcon = section.icon
+                      return (
+                        <button
+                          key={section.key}
+                          onClick={() => toggleInvestigationSection(section.key)}
+                          className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-all ${
+                            expandedInvestigationSections[section.key] 
+                              ? `${section.bgColor} ${section.color} ring-2 ring-current/30` 
+                              : 'bg-gray-700/50 text-gray-400 hover:bg-gray-700 hover:text-gray-300'
+                          }`}
+                        >
+                          <SectionIcon className="w-3.5 h-3.5" />
+                          {section.title}
+                          <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                            expandedInvestigationSections[section.key] ? 'bg-white/20' : 'bg-gray-600'
+                          }`}>
+                            {section.items.length}
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+
+                  {/* Investigation Sections */}
+                  <div className="space-y-4">
+                    {investigationSections.map((section) => {
+                      const SectionIcon = section.icon
+                      const isExpanded = expandedInvestigationSections[section.key] ?? true
+                      
+                      return (
+                        <div 
+                          key={section.key} 
+                          className={`rounded-2xl border overflow-hidden transition-all ${section.borderColor} bg-gray-800/20`}
+                        >
+                          {/* Section Header */}
+                          <button
+                            onClick={() => toggleInvestigationSection(section.key)}
+                            className="w-full flex items-center justify-between p-4 hover:bg-gray-800/30 transition-colors"
+                          >
+                            <div className="flex items-center gap-3">
+                              <div className={`w-10 h-10 rounded-xl ${section.bgColor} flex items-center justify-center`}>
+                                <SectionIcon className={`w-5 h-5 ${section.color}`} />
+                              </div>
+                              <div className="text-left">
+                                <h4 className="text-sm font-semibold text-white">{section.title}</h4>
+                                {section.summary && (
+                                  <p className="text-xs text-gray-500 mt-0.5">{section.summary}</p>
+                                )}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-3">
+                              <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${section.bgColor} ${section.color}`}>
+                                {section.items.length} {section.items.length === 1 ? 'item' : 'items'}
+                              </span>
+                              {isExpanded ? (
+                                <ChevronUp className="w-4 h-4 text-gray-500" />
+                              ) : (
+                                <ChevronDown className="w-4 h-4 text-gray-500" />
+                              )}
+                            </div>
+                          </button>
+
+                          {/* Section Content */}
+                          {isExpanded && (
+                            <div className="px-4 pb-4 space-y-2">
+                              {section.items.map((item, idx) => (
+                                <InvestigationItemCard key={idx} item={item} />
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
+                  </div>
                 </div>
               ) : null}
             </Card>
@@ -697,8 +779,63 @@ function ConfidenceBadge({ value }: { value: number }) {
   )
 }
 
-// Investigation Parser
-function parseInvestigation(investigation: string): InvestigationSection[] {
+// Investigation Item Card Component
+function InvestigationItemCard({ item }: { item: InvestigationItem }) {
+  const severityStyles = {
+    critical: 'border-l-red-500 bg-red-950/20',
+    warning: 'border-l-yellow-500 bg-yellow-950/20',
+    info: 'border-l-blue-500 bg-blue-950/20',
+    success: 'border-l-green-500 bg-green-950/20'
+  }
+  
+  const severityIcons = {
+    critical: AlertCircle,
+    warning: AlertTriangle,
+    info: Info,
+    success: CheckCircle
+  }
+  
+  const style = item.severity ? severityStyles[item.severity] : 'border-l-gray-600 bg-gray-800/30'
+  const SeverityIcon = item.severity ? severityIcons[item.severity] : null
+  
+  return (
+    <div className={`rounded-xl border-l-4 ${style} p-4`}>
+      <div className="flex items-start gap-3">
+        {SeverityIcon && (
+          <SeverityIcon className={`w-4 h-4 mt-0.5 shrink-0 ${
+            item.severity === 'critical' ? 'text-red-400' :
+            item.severity === 'warning' ? 'text-yellow-400' :
+            item.severity === 'info' ? 'text-blue-400' : 'text-green-400'
+          }`} />
+        )}
+        <div className="flex-1 min-w-0">
+          {item.title && (
+            <p className="text-sm font-medium text-white mb-1">{item.title}</p>
+          )}
+          <p className="text-sm text-gray-400 leading-relaxed">{item.description}</p>
+          
+          {/* Metadata Tags */}
+          {item.metadata && Object.keys(item.metadata).length > 0 && (
+            <div className="flex flex-wrap gap-2 mt-3">
+              {Object.entries(item.metadata).map(([key, value]) => (
+                <span 
+                  key={key} 
+                  className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md text-xs bg-gray-700/50 text-gray-400"
+                >
+                  <span className="text-gray-500">{key}:</span>
+                  <span className="font-medium text-gray-300">{value}</span>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Enhanced Investigation Parser
+function parseInvestigationEnhanced(investigation: string): InvestigationSection[] {
   // Helper to check if text is a "no data" message
   const isNoDataMessage = (text: string): boolean => {
     const lower = text.toLowerCase().trim()
@@ -732,37 +869,232 @@ function parseInvestigation(investigation: string): InvestigationSection[] {
     .replace(/<[^>]+>/g, '')
     .replace(/\n{3,}/g, '\n\n')
 
-  const SOURCE_MAP: Record<string, { title: string; icon: string; color: string }> = {
-    'incident history': { title: 'Past Incidents', icon: '🔍', color: 'border-l-blue-500' },
-    'opensearch': { title: 'Log Analysis', icon: '📊', color: 'border-l-teal-500' },
-    'runbook': { title: 'Runbook', icon: '📋', color: 'border-l-purple-500' },
-    'deployment': { title: 'Deployment History', icon: '🚀', color: 'border-l-orange-500' }
+  // Enhanced source configuration with Lucide icons
+  const SOURCE_CONFIG: Record<string, { 
+    key: string
+    title: string
+    icon: typeof History
+    color: string
+    bgColor: string
+    borderColor: string
+  }> = {
+    'incident history': { 
+      key: 'incidents',
+      title: 'Past Incidents', 
+      icon: History, 
+      color: 'text-blue-400',
+      bgColor: 'bg-blue-500/15',
+      borderColor: 'border-blue-500/30'
+    },
+    'opensearch': { 
+      key: 'logs',
+      title: 'Log Analysis', 
+      icon: Search, 
+      color: 'text-teal-400',
+      bgColor: 'bg-teal-500/15',
+      borderColor: 'border-teal-500/30'
+    },
+    'runbook': { 
+      key: 'runbook',
+      title: 'Runbook', 
+      icon: FileCode, 
+      color: 'text-purple-400',
+      bgColor: 'bg-purple-500/15',
+      borderColor: 'border-purple-500/30'
+    },
+    'deployment': { 
+      key: 'deployments',
+      title: 'Deployment History', 
+      icon: GitBranch, 
+      color: 'text-orange-400',
+      bgColor: 'bg-orange-500/15',
+      borderColor: 'border-orange-500/30'
+    },
+    'x-ray': { 
+      key: 'xray',
+      title: 'X-Ray Traces', 
+      icon: Cpu, 
+      color: 'text-pink-400',
+      bgColor: 'bg-pink-500/15',
+      borderColor: 'border-pink-500/30'
+    },
+    'trace': { 
+      key: 'xray',
+      title: 'X-Ray Traces', 
+      icon: Cpu, 
+      color: 'text-pink-400',
+      bgColor: 'bg-pink-500/15',
+      borderColor: 'border-pink-500/30'
+    },
+    'config': { 
+      key: 'config',
+      title: 'AWS Config', 
+      icon: Settings, 
+      color: 'text-amber-400',
+      bgColor: 'bg-amber-500/15',
+      borderColor: 'border-amber-500/30'
+    },
+    'drift': { 
+      key: 'config',
+      title: 'AWS Config', 
+      icon: Settings, 
+      color: 'text-amber-400',
+      bgColor: 'bg-amber-500/15',
+      borderColor: 'border-amber-500/30'
+    }
   }
 
-  const sectionMap = new Map<string, { title: string; icon: string; color: string; items: string[] }>()
-  let currentKey = 'summary'
+  const sectionMap = new Map<string, InvestigationSection>()
+  let currentKey = 'general'
+
+  // Helper to parse item with metadata
+  const parseItem = (text: string, sectionKey: string): InvestigationItem => {
+    const item: InvestigationItem = {
+      type: 'text',
+      description: text
+    }
+
+    // Parse incident references
+    const incidentMatch = text.match(/^(INC-[A-Z0-9]+):\s*(.+?)(?:\s*\((.+)\))?$/i)
+    if (incidentMatch) {
+      item.type = 'incident'
+      item.title = incidentMatch[1]
+      item.description = incidentMatch[2]
+      if (incidentMatch[3]) {
+        const metaParts = incidentMatch[3].split(',').map(p => p.trim())
+        item.metadata = {}
+        metaParts.forEach(part => {
+          const [key, val] = part.split(':').map(s => s.trim())
+          if (key && val) item.metadata![key] = val
+        })
+      }
+      item.severity = 'info'
+      return item
+    }
+
+    // Parse log entries
+    const logMatch = text.match(/^(.+?):\s*(.+?)(?:\s*\((\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}[^\)]*)\))?$/i)
+    if (logMatch && sectionKey === 'logs') {
+      item.type = 'log'
+      item.title = logMatch[1]
+      item.description = logMatch[2]
+      if (logMatch[3]) {
+        item.metadata = { timestamp: new Date(logMatch[3]).toLocaleString() }
+      }
+      // Determine severity based on content
+      if (/error|fault|fail|critical/i.test(text)) item.severity = 'critical'
+      else if (/warn|threshold|exceeded/i.test(text)) item.severity = 'warning'
+      else item.severity = 'info'
+      return item
+    }
+
+    // Parse runbook entries
+    if (sectionKey === 'runbook') {
+      item.type = 'runbook'
+      if (/^runbook:/i.test(text)) {
+        item.title = text.replace(/^runbook:\s*/i, '')
+        item.description = 'Recommended troubleshooting guide'
+      } else if (/^category:/i.test(text) || /estimated ttr/i.test(text)) {
+        const parts = text.split(',').map(p => p.trim())
+        item.metadata = {}
+        parts.forEach(part => {
+          const [key, val] = part.split(':').map(s => s?.trim())
+          if (key && val) item.metadata![key] = val
+        })
+        item.description = 'Runbook metadata'
+      }
+      item.severity = 'info'
+      return item
+    }
+
+    // Parse deployment entries
+    if (sectionKey === 'deployments') {
+      item.type = 'deployment'
+      const deployMatch = text.match(/^Deploy\s+(deploy-[a-z0-9]+):\s*v?([^\s]+)\s*\(([^)]+)\)\s*-?\s*(.*)$/i)
+      if (deployMatch) {
+        item.title = `${deployMatch[1]} - ${deployMatch[2]}`
+        item.description = deployMatch[4] || 'Deployment'
+        item.metadata = { status: deployMatch[3] }
+        item.severity = deployMatch[3] === 'completed' ? 'success' : 'warning'
+      } else if (/config:/i.test(text)) {
+        item.title = 'Configuration Change'
+        item.description = text.replace(/^config:\s*/i, '')
+        item.severity = 'warning'
+      }
+      return item
+    }
+
+    // Parse X-Ray traces
+    if (sectionKey === 'xray') {
+      item.type = 'trace'
+      const traceMatch = text.match(/^(1-[a-f0-9-]+):\s*(\d+)ms(?:,\s*HTTP\s*(\d+))?/i)
+      if (traceMatch) {
+        item.title = traceMatch[1]
+        item.description = `Response time: ${traceMatch[2]}ms`
+        item.metadata = { duration: `${traceMatch[2]}ms` }
+        if (traceMatch[3]) {
+          item.metadata.status = `HTTP ${traceMatch[3]}`
+          item.severity = parseInt(traceMatch[3]) >= 500 ? 'critical' : 'warning'
+        }
+      } else if (/insight|fault|latency|error rate/i.test(text)) {
+        item.title = 'X-Ray Insight'
+        item.description = text.replace(/^x-ray insights?:\s*/i, '')
+        item.severity = /fault|error/i.test(text) ? 'critical' : 'warning'
+      }
+      return item
+    }
+
+    // Parse AWS Config entries
+    if (sectionKey === 'config') {
+      item.type = 'config'
+      if (/non-compliant/i.test(text)) {
+        item.title = 'Non-Compliant Resource'
+        item.description = text
+        item.severity = 'warning'
+      } else if (/rule:/i.test(text)) {
+        item.title = 'Config Rule'
+        item.description = text.replace(/^rule:\s*/i, '')
+        item.severity = 'info'
+      } else if (/config enabled/i.test(text)) {
+        item.severity = 'success'
+      }
+      return item
+    }
+
+    // Default severity based on content
+    if (/error|fault|fail|critical|exceeded/i.test(text)) item.severity = 'critical'
+    else if (/warn|high|increased|anomaly/i.test(text)) item.severity = 'warning'
+    else if (/success|completed|resolved/i.test(text)) item.severity = 'success'
+    else item.severity = 'info'
+
+    return item
+  }
 
   cleaned.split('\n').forEach(line => {
     const trimmed = line.trim()
     if (!trimmed || trimmed.length < 5) return
     
-    // Skip any line that contains "no data" type messages anywhere
+    // Skip any line that contains "no data" type messages
     if (isNoDataMessage(trimmed)) return
 
     const sourceMatch = trimmed.match(/\[Source:\s*([^\]]+)\]/i)
     if (sourceMatch) {
       const tag = sourceMatch[1].toLowerCase()
-      for (const [key, cfg] of Object.entries(SOURCE_MAP)) {
+      for (const [key, cfg] of Object.entries(SOURCE_CONFIG)) {
         if (tag.includes(key)) {
-          currentKey = key
-          if (!sectionMap.has(key)) sectionMap.set(key, { ...cfg, items: [] })
+          currentKey = cfg.key
+          if (!sectionMap.has(cfg.key)) {
+            sectionMap.set(cfg.key, { ...cfg, items: [] })
+          }
           break
         }
       }
       const rest = trimmed.replace(/\[Source:[^\]]+\]\s*/gi, '').trim()
-      // Skip "no data found" type messages
       if (rest && rest.length > 10 && !isNoDataMessage(rest)) {
-        sectionMap.get(currentKey)?.items.push(rest)
+        const section = sectionMap.get(currentKey)
+        if (section) {
+          section.items.push(parseItem(rest, currentKey))
+        }
       }
       return
     }
@@ -773,13 +1105,25 @@ function parseInvestigation(investigation: string): InvestigationSection[] {
 
     const clean = trimmed.replace(/^[-•]\s*/, '').replace(/^\d+\.\s*/, '').trim()
     if (clean.length > 10 && !isNoDataMessage(clean)) {
-      const existing = sectionMap.get(currentKey)
-      if (existing && !existing.items.some(i => i.toLowerCase() === clean.toLowerCase())) {
-        existing.items.push(clean)
+      const section = sectionMap.get(currentKey)
+      if (section && !section.items.some(i => i.description.toLowerCase() === clean.toLowerCase())) {
+        section.items.push(parseItem(clean, currentKey))
       }
     }
   })
 
-  // Only return sections that have real content (not just "no data" messages)
-  return Array.from(sectionMap.values()).filter(s => s.items.length > 0)
+  // Generate summaries for each section
+  const sections = Array.from(sectionMap.values()).filter(s => s.items.length > 0)
+  sections.forEach(section => {
+    const criticalCount = section.items.filter(i => i.severity === 'critical').length
+    const warningCount = section.items.filter(i => i.severity === 'warning').length
+    
+    if (criticalCount > 0) {
+      section.summary = `${criticalCount} critical finding${criticalCount > 1 ? 's' : ''}`
+    } else if (warningCount > 0) {
+      section.summary = `${warningCount} warning${warningCount > 1 ? 's' : ''}`
+    }
+  })
+
+  return sections
 }
