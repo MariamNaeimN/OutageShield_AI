@@ -61,6 +61,7 @@ def generate_signal(event, detection_type):
     return {
         'signal_id': 'INC-' + str(uuid.uuid4())[:8].upper(),
         'service': service,
+        'alarm_name': alarm_name,  # Pass alarm_name through for runbook lookup
         'detection_type': detection_type,
         'severity_score': calculate_severity(detail),
         'timestamp': datetime.now(timezone.utc).isoformat(),

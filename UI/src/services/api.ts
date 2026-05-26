@@ -275,10 +275,39 @@ function parseRecommendations(raw: unknown): Recommendation[] {
   } else {
     return []
   }
+  
   // Filter out RCA entries (they have description+confidence+evidence but no category)
   // Only return actual recommendations that have a category field
   const validCategories = ['rollback', 'scaling', 'configuration_change', 'manual_intervention', 'manual', 'config']
-  return parsed.filter(item => item.category && validCategories.includes(item.category))
+  
+  // Filter out "no data found" type recommendations
+  const isNoDataRecommendation = (desc: string): boolean => {
+    const lower = desc.toLowerCase()
+    return (
+      lower.includes('no runbook found') ||
+      lower.includes('no similar past incidents') ||
+      lower.includes('no matching runbook') ||
+      lower.includes('no matching incidents') ||
+      lower.includes('runbook lookup returned no') ||
+      lower.includes('incident history search returned no') ||
+      lower.includes('follow general troubleshooting') ||
+      lower.includes('this may be a new issue type') ||
+      lower.includes('no relevant data') ||
+      lower.includes('no data found') ||
+      lower.includes('no results found') ||
+      lower.includes('could not find') ||
+      lower.includes('unable to find')
+    )
+  }
+  
+  return parsed.filter(item => {
+    // Must have a valid category
+    if (!item.category || !validCategories.includes(item.category)) return false
+    // Filter out "no data" recommendations
+    const desc = String(item.description || '')
+    if (isNoDataRecommendation(desc)) return false
+    return true
+  })
 }
 
 export async function getIncidentById(id: string): Promise<Incident> {

@@ -182,24 +182,46 @@ def get_runbook(params):
     
     table = dynamodb.Table(RUNBOOKS_TABLE)
     
-    try:
-        response = table.get_item(Key={'runbook_id': alarm_type})
-        item = response.get('Item')
-        if item:
-            return {
-                'service': service,
-                'alarm_type': alarm_type,
-                'found': True,
-                'runbook': {
-                    'title': item.get('title', ''),
-                    'description': item.get('description', ''),
-                    'steps': item.get('steps', []),
-                    'category': item.get('category', 'manual_intervention'),
-                    'estimated_ttr': item.get('estimated_ttr', 'Unknown')
+    # Extract the alarm type prefix from alarm names like "HighLatency-prod-api-gateway"
+    # Runbook IDs are stored as just "HighLatency", "AuthFailures", etc.
+    alarm_type_prefix = alarm_type.split('-')[0] if '-' in alarm_type else alarm_type
+    
+    # Known runbook IDs to try matching
+    known_runbooks = ['HighLatency', 'High5xxRate', 'HighCPU', 'MemoryPressure', 
+                      'ConnectionPool', 'QueueBacklog', 'AuthFailures', 'CacheMissRate', 'DiskUsage']
+    
+    # Try exact match first, then prefix match
+    keys_to_try = [alarm_type, alarm_type_prefix]
+    
+    # Also try to match known runbook patterns in the alarm type
+    for rb in known_runbooks:
+        if rb.lower() in alarm_type.lower():
+            keys_to_try.append(rb)
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    keys_to_try = [k for k in keys_to_try if not (k in seen or seen.add(k))]
+    
+    for key in keys_to_try:
+        try:
+            response = table.get_item(Key={'runbook_id': key})
+            item = response.get('Item')
+            if item:
+                return {
+                    'service': service,
+                    'alarm_type': alarm_type,
+                    'matched_runbook_id': key,
+                    'found': True,
+                    'runbook': {
+                        'title': item.get('title', ''),
+                        'description': item.get('description', ''),
+                        'steps': item.get('steps', []),
+                        'category': item.get('category', 'manual_intervention'),
+                        'estimated_ttr': item.get('estimated_ttr', 'Unknown')
+                    }
                 }
-            }
-    except Exception as e:
-        print(f"Runbook lookup failed: {e}")
+        except Exception as e:
+            print(f"Runbook lookup failed for key {key}: {e}")
 
     return {
         'service': service,
