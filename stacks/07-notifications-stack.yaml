@@ -331,20 +331,23 @@ Resources:
 
           def create_pagerduty_incident(incident_id, service, severity, root_cause):
               try:
+                  import time
                   secret = sm.get_secret_value(SecretId=PAGERDUTY_SECRET)
                   creds = json.loads(secret['SecretString'])
                   routing_key = creds['routing_key']
+                  api_key = creds.get('api_key', '')
                   
                   severity_map = {5: 'critical', 4: 'critical', 3: 'error', 2: 'warning', 1: 'info'}
                   pd_severity = severity_map.get(severity, 'error')
                   dashboard_link = f"{DASHBOARD_URL}/incidents/{incident_id}"
+                  alarm_name = f"Outage signal on {service}"
                   
                   event_payload = {
                       "routing_key": routing_key,
                       "event_action": "trigger",
                       "dedup_key": incident_id,
                       "payload": {
-                          "summary": f"[OutageShield] SEV-{severity} | {service}"[:255],
+                          "summary": f"[OutageShield] SEV-{severity} | {service} | {alarm_name}"[:255],
                           "source": "OutageShield AI",
                           "severity": pd_severity,
                           "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -361,7 +364,30 @@ Resources:
                   response = urllib.request.urlopen(req)
                   result = json.loads(response.read().decode())
                   dedup_key = result.get('dedup_key', incident_id)
-                  return {'system': 'PagerDuty', 'success': True, 'ticket_id': f"PD-{dedup_key[:8].upper()}", 'ticket_url': f"https://app.pagerduty.com/incidents?search={dedup_key}"}
+                  
+                  # Fetch real PagerDuty URL using REST API
+                  real_pd_id, real_pd_url = None, None
+                  if api_key:
+                      time.sleep(2)
+                      try:
+                          search_url = "https://api.pagerduty.com/incidents?limit=50&statuses[]=triggered&statuses[]=acknowledged"
+                          req2 = urllib.request.Request(search_url)
+                          req2.add_header('Authorization', f'Token token={api_key}')
+                          req2.add_header('Content-Type', 'application/json')
+                          resp2 = urllib.request.urlopen(req2)
+                          pd_data = json.loads(resp2.read().decode())
+                          for inc in pd_data.get('incidents', []):
+                              title = inc.get('title', '')
+                              if service in title and '[OutageShield]' in title:
+                                  real_pd_id = inc.get('id', '')
+                                  real_pd_url = inc.get('html_url', '')
+                                  break
+                      except Exception as e:
+                          print(f"Failed to fetch real PagerDuty URL: {e}")
+                  
+                  ticket_id = real_pd_id if real_pd_id else f"PD-{dedup_key[:8].upper()}"
+                  ticket_url = real_pd_url if real_pd_url else f"https://app.pagerduty.com/incidents?search={dedup_key}"
+                  return {'system': 'PagerDuty', 'success': True, 'ticket_id': ticket_id, 'ticket_url': ticket_url, 'pagerduty_id': ticket_id, 'pagerduty_url': ticket_url}
               except Exception as e:
                   return {'system': 'PagerDuty', 'success': False, 'error': str(e)[:100]}
 
@@ -370,18 +396,26 @@ Resources:
                   table = dynamodb.Table(INCIDENTS_TABLE)
                   tickets_json = json.dumps(results.get('tickets', []))
                   ticket_systems = [t['system'] for t in results.get('tickets', []) if t.get('success')]
-                  table.update_item(
-                      Key={'incident_id': incident_id},
-                      UpdateExpression='SET ticket_id = :tid, ticket_system = :ts, ticket_status = :tst, ticket_url = :tu, tickets_all = :ta, workflow_step = :ws',
-                      ExpressionAttributeValues={
-                          ':tid': results.get('ticket_id', 'N/A'),
-                          ':ts': ', '.join(ticket_systems) if ticket_systems else 'None',
-                          ':tst': 'Open',
-                          ':tu': results.get('ticket_url', ''),
-                          ':ta': tickets_json,
-                          ':ws': 'ticket_created'
-                      }
-                  )
+                  
+                  update_expr = 'SET ticket_id = :tid, ticket_system = :ts, ticket_status = :tst, ticket_url = :tu, tickets_all = :ta, workflow_step = :ws'
+                  expr_values = {
+                      ':tid': results.get('ticket_id', 'N/A'),
+                      ':ts': ', '.join(ticket_systems) if ticket_systems else 'None',
+                      ':tst': 'Open',
+                      ':tu': results.get('ticket_url', ''),
+                      ':ta': tickets_json,
+                      ':ws': 'ticket_created'
+                  }
+                  
+                  # Add PagerDuty fields if present
+                  for t in results.get('tickets', []):
+                      if t.get('system') == 'PagerDuty' and t.get('success'):
+                          update_expr += ', pagerduty_id = :pdid, pagerduty_url = :pdurl'
+                          expr_values[':pdid'] = t.get('pagerduty_id', t.get('ticket_id', ''))
+                          expr_values[':pdurl'] = t.get('pagerduty_url', t.get('ticket_url', ''))
+                          break
+                  
+                  table.update_item(Key={'incident_id': incident_id}, UpdateExpression=update_expr, ExpressionAttributeValues=expr_values)
               except Exception as e:
                   print(f"DynamoDB store failed: {e}")
 
