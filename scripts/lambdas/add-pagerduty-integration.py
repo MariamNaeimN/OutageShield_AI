@@ -98,19 +98,32 @@ def lambda_handler(event, context):
                 results['ticket_id'] = jira_result['ticket_id']
                 results['ticket_url'] = jira_result['ticket_url']
 
-    # Create PagerDuty incident (uses dedup_key, so safe to call again)
+    # Create PagerDuty incident (each incident gets unique dedup_key)
     if TICKET_SYSTEM in ['pagerduty', 'both']:
-        pd_result = create_pagerduty_incident(
-            incident_id, service, severity, biz_impact, revenue,
-            affected_users, sla_status, top_rc, confidence, alarm_name, reason
-        )
-        results['tickets'].append(pd_result)
-        if pd_result.get('success'):
-            if 'ticket_id' not in results:
-                results['ticket_id'] = pd_result['ticket_id']
-                results['ticket_url'] = pd_result['ticket_url']
-            results['pagerduty_id'] = pd_result['ticket_id']
-            results['pagerduty_url'] = pd_result['ticket_url']
+        # Check if this specific incident already has a PagerDuty ticket
+        if existing_pd and existing_pd != 'N/A' and not existing_pd.startswith('PD-'):
+            print(f"PagerDuty ticket already exists: {existing_pd}, skipping creation")
+            results['tickets'].append({
+                'system': 'PagerDuty',
+                'success': True,
+                'ticket_id': existing_pd,
+                'ticket_url': f"https://rackspace-marim.eu.pagerduty.com/incidents/{existing_pd}",
+                'skipped': True
+            })
+            results['pagerduty_id'] = existing_pd
+            results['pagerduty_url'] = f"https://rackspace-marim.eu.pagerduty.com/incidents/{existing_pd}"
+        else:
+            pd_result = create_pagerduty_incident(
+                incident_id, service, severity, biz_impact, revenue,
+                affected_users, sla_status, top_rc, confidence, alarm_name, reason
+            )
+            results['tickets'].append(pd_result)
+            if pd_result.get('success'):
+                if 'ticket_id' not in results:
+                    results['ticket_id'] = pd_result['ticket_id']
+                    results['ticket_url'] = pd_result['ticket_url']
+                results['pagerduty_id'] = pd_result['ticket_id']
+                results['pagerduty_url'] = pd_result['ticket_url']
 
     # Store in DynamoDB
     store_ticket_info(incident_id, results)
@@ -226,12 +239,16 @@ def create_pagerduty_incident(incident_id, service, severity, biz_impact, revenu
     pd_severity = severity_map.get(severity, 'error')
 
     dashboard_link = f"{DASHBOARD_URL}/incidents/{incident_id}"
+    
+    # Use unique dedup_key with timestamp to ensure each incident gets its own PagerDuty ticket
+    timestamp = datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')
+    dedup_key = f"{incident_id}-{timestamp}"
 
     # PagerDuty Events API v2 payload
     event_payload = {
         "routing_key": routing_key,
         "event_action": "trigger",
-        "dedup_key": incident_id,  # Prevents duplicate incidents
+        "dedup_key": dedup_key,  # Unique per incident+time
         "payload": {
             "summary": f"[OutageShield] SEV-{severity} | {service} | {alarm_name}",
             "source": "OutageShield AI",
@@ -274,8 +291,8 @@ def create_pagerduty_incident(incident_id, service, severity, biz_impact, revenu
         response = urllib.request.urlopen(req)
         result = json.loads(response.read().decode())
         
-        dedup_key = result.get('dedup_key', incident_id)
-        print(f"PagerDuty incident triggered: {dedup_key}")
+        returned_dedup_key = result.get('dedup_key', dedup_key)
+        print(f"PagerDuty incident triggered: {returned_dedup_key}")
         
         # Fetch real PagerDuty incident URL using REST API
         real_pd_id = None
@@ -283,11 +300,11 @@ def create_pagerduty_incident(incident_id, service, severity, biz_impact, revenu
         
         if api_key:
             import time
-            time.sleep(2)  # Wait for PagerDuty to process the event
+            time.sleep(3)  # Wait for PagerDuty to process the event
             
             try:
-                # Search for the incident by service and alarm name
-                search_url = f"https://api.pagerduty.com/incidents?limit=50&statuses[]=triggered&statuses[]=acknowledged"
+                # Search for the incident by service and alarm name in triggered incidents
+                search_url = f"https://api.pagerduty.com/incidents?limit=50&statuses[]=triggered&statuses[]=acknowledged&sort_by=created_at:desc"
                 req = urllib.request.Request(search_url)
                 req.add_header('Authorization', f'Token token={api_key}')
                 req.add_header('Content-Type', 'application/json')
@@ -295,10 +312,10 @@ def create_pagerduty_incident(incident_id, service, severity, biz_impact, revenu
                 response = urllib.request.urlopen(req)
                 pd_data = json.loads(response.read().decode())
                 
-                # Find matching incident by service and alarm in title
+                # Find matching incident by service and alarm in title (most recent first)
                 for inc in pd_data.get('incidents', []):
                     title = inc.get('title', '')
-                    if service in title and alarm_name in title and '[OutageShield]' in title:
+                    if service in title and '[OutageShield]' in title:
                         real_pd_id = inc.get('id', '')
                         real_pd_url = inc.get('html_url', '')
                         print(f"Found real PagerDuty URL: {real_pd_url}")
@@ -311,15 +328,15 @@ def create_pagerduty_incident(incident_id, service, severity, biz_impact, revenu
             ticket_id = real_pd_id
             ticket_url = real_pd_url
         else:
-            ticket_id = f"PD-{dedup_key[:8].upper()}"
-            ticket_url = f"https://app.pagerduty.com/incidents?search={dedup_key}"
+            ticket_id = f"PD-{returned_dedup_key[:8].upper()}"
+            ticket_url = f"https://app.pagerduty.com/incidents?search={returned_dedup_key}"
         
         return {
             'system': 'PagerDuty',
             'success': True,
             'ticket_id': ticket_id,
             'ticket_url': ticket_url,
-            'dedup_key': dedup_key,
+            'dedup_key': returned_dedup_key,
             'status': result.get('status', 'success'),
             'message': result.get('message', 'Event processed')
         }

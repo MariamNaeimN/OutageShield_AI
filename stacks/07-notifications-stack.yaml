@@ -342,10 +342,14 @@ Resources:
                   dashboard_link = f"{DASHBOARD_URL}/incidents/{incident_id}"
                   alarm_name = f"Outage signal on {service}"
                   
+                  # Use unique dedup_key with timestamp for each new incident
+                  timestamp = datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')
+                  dedup_key = f"{incident_id}-{timestamp}"
+                  
                   event_payload = {
                       "routing_key": routing_key,
                       "event_action": "trigger",
-                      "dedup_key": incident_id,
+                      "dedup_key": dedup_key,
                       "payload": {
                           "summary": f"[OutageShield] SEV-{severity} | {service} | {alarm_name}"[:255],
                           "source": "OutageShield AI",
@@ -363,14 +367,14 @@ Resources:
                   req.add_header('Content-Type', 'application/json')
                   response = urllib.request.urlopen(req)
                   result = json.loads(response.read().decode())
-                  dedup_key = result.get('dedup_key', incident_id)
+                  returned_dedup_key = result.get('dedup_key', dedup_key)
                   
                   # Fetch real PagerDuty URL using REST API
                   real_pd_id, real_pd_url = None, None
                   if api_key:
-                      time.sleep(2)
+                      time.sleep(3)
                       try:
-                          search_url = "https://api.pagerduty.com/incidents?limit=50&statuses[]=triggered&statuses[]=acknowledged"
+                          search_url = "https://api.pagerduty.com/incidents?limit=50&statuses[]=triggered&statuses[]=acknowledged&sort_by=created_at:desc"
                           req2 = urllib.request.Request(search_url)
                           req2.add_header('Authorization', f'Token token={api_key}')
                           req2.add_header('Content-Type', 'application/json')
@@ -385,8 +389,8 @@ Resources:
                       except Exception as e:
                           print(f"Failed to fetch real PagerDuty URL: {e}")
                   
-                  ticket_id = real_pd_id if real_pd_id else f"PD-{dedup_key[:8].upper()}"
-                  ticket_url = real_pd_url if real_pd_url else f"https://app.pagerduty.com/incidents?search={dedup_key}"
+                  ticket_id = real_pd_id if real_pd_id else f"PD-{returned_dedup_key[:8].upper()}"
+                  ticket_url = real_pd_url if real_pd_url else f"https://app.pagerduty.com/incidents?search={returned_dedup_key}"
                   return {'system': 'PagerDuty', 'success': True, 'ticket_id': ticket_id, 'ticket_url': ticket_url, 'pagerduty_id': ticket_id, 'pagerduty_url': ticket_url}
               except Exception as e:
                   return {'system': 'PagerDuty', 'success': False, 'error': str(e)[:100]}
