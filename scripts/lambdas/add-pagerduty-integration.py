@@ -211,19 +211,17 @@ def create_jira_ticket(incident_id, service, severity, biz_impact, revenue,
 
 def create_pagerduty_incident(incident_id, service, severity, biz_impact, revenue,
                                affected_users, sla_status, top_rc, confidence, alarm_name, reason):
-    """Create a PagerDuty incident via Events API v2."""
+    """Create a PagerDuty incident via Events API v2 and fetch real URL."""
     try:
         secret = sm.get_secret_value(SecretId=PAGERDUTY_SECRET)
         creds = json.loads(secret['SecretString'])
         routing_key = creds['routing_key']  # Integration key from PagerDuty service
-        # Optional: API key for REST API operations
-        api_key = creds.get('api_key', '')
+        api_key = creds.get('api_key', '')  # API key for REST API to fetch real URL
     except Exception as e:
         print(f"Failed to get PagerDuty credentials: {e}")
         return {'system': 'PagerDuty', 'success': False, 'error': str(e)[:100]}
 
     # Map severity to PagerDuty severity
-    # PagerDuty: critical, error, warning, info
     severity_map = {5: 'critical', 4: 'critical', 3: 'error', 2: 'warning', 1: 'info'}
     pd_severity = severity_map.get(severity, 'error')
 
@@ -277,15 +275,49 @@ def create_pagerduty_incident(incident_id, service, severity, biz_impact, revenu
         result = json.loads(response.read().decode())
         
         dedup_key = result.get('dedup_key', incident_id)
-        # PagerDuty doesn't return incident URL directly from Events API
-        # We construct a search URL or use the dedup_key
-        ticket_url = f"https://app.pagerduty.com/incidents?search={dedup_key}"
+        print(f"PagerDuty incident triggered: {dedup_key}")
         
-        print(f"PagerDuty incident created: {dedup_key}")
+        # Fetch real PagerDuty incident URL using REST API
+        real_pd_id = None
+        real_pd_url = None
+        
+        if api_key:
+            import time
+            time.sleep(2)  # Wait for PagerDuty to process the event
+            
+            try:
+                # Search for the incident by service and alarm name
+                search_url = f"https://api.pagerduty.com/incidents?limit=50&statuses[]=triggered&statuses[]=acknowledged"
+                req = urllib.request.Request(search_url)
+                req.add_header('Authorization', f'Token token={api_key}')
+                req.add_header('Content-Type', 'application/json')
+                
+                response = urllib.request.urlopen(req)
+                pd_data = json.loads(response.read().decode())
+                
+                # Find matching incident by service and alarm in title
+                for inc in pd_data.get('incidents', []):
+                    title = inc.get('title', '')
+                    if service in title and alarm_name in title and '[OutageShield]' in title:
+                        real_pd_id = inc.get('id', '')
+                        real_pd_url = inc.get('html_url', '')
+                        print(f"Found real PagerDuty URL: {real_pd_url}")
+                        break
+            except Exception as e:
+                print(f"Failed to fetch real PagerDuty URL: {e}")
+        
+        # Use real URL if found, otherwise fallback to search URL
+        if real_pd_id and real_pd_url:
+            ticket_id = real_pd_id
+            ticket_url = real_pd_url
+        else:
+            ticket_id = f"PD-{dedup_key[:8].upper()}"
+            ticket_url = f"https://app.pagerduty.com/incidents?search={dedup_key}"
+        
         return {
             'system': 'PagerDuty',
             'success': True,
-            'ticket_id': f"PD-{dedup_key[:8].upper()}",
+            'ticket_id': ticket_id,
             'ticket_url': ticket_url,
             'dedup_key': dedup_key,
             'status': result.get('status', 'success'),
