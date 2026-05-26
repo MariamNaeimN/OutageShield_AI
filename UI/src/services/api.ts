@@ -164,40 +164,41 @@ function mapIncident(raw: any): Incident {
   let rootCauses: RootCauseEntry[] | undefined
 
   const tryParseRootCauses = (value: unknown): RootCauseEntry[] | null => {
-    let arr: any[] | null = null
-    if (Array.isArray(value)) {
-      arr = value
-    } else if (typeof value === 'string') {
-      let trimmed = value.trim()
-      // Handle double-encoded JSON (string inside a string)
-      if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
-        try { trimmed = JSON.parse(trimmed) } catch { /* not double-encoded */ }
-      }
-      if (typeof trimmed === 'string' && trimmed.startsWith('[')) {
-        try { arr = JSON.parse(trimmed) } catch { /* not valid JSON */ }
-      }
-    }
-    if (!arr || arr.length === 0) return null
-
-    // Check if the first item's description is itself a JSON array (double-encoded RCA)
-    const firstDesc = arr[0]?.description
-    if (typeof firstDesc === 'string' && firstDesc.trim().startsWith('[')) {
-      try {
-        const inner = JSON.parse(firstDesc.trim())
-        if (Array.isArray(inner) && inner.length > 0 && inner[0]?.description) {
-          arr = inner // use the inner array instead
+    try {
+      let arr: any[] | null = null
+      if (Array.isArray(value)) {
+        arr = value
+      } else if (typeof value === 'string') {
+        let trimmed = value.trim()
+        // Handle double-encoded JSON (string inside a string)
+        if (trimmed.startsWith('"') && trimmed.endsWith('"')) {
+          try { trimmed = JSON.parse(trimmed) } catch { /* not double-encoded */ }
         }
-      } catch { /* keep outer array */ }
-    }
+        if (typeof trimmed === 'string' && trimmed.startsWith('[')) {
+          try { arr = JSON.parse(trimmed) } catch { /* not valid JSON */ }
+        }
+      }
+      if (!arr || arr.length === 0) return null
 
-    // Must look like RCA entries (have description field)
-    if (!arr[0]?.description) return null
+      // Check if the first item's description is itself a JSON array (double-encoded RCA)
+      const firstDesc = arr[0]?.description
+      if (typeof firstDesc === 'string' && firstDesc.trim().startsWith('[')) {
+        try {
+          const inner = JSON.parse(firstDesc.trim())
+          if (Array.isArray(inner) && inner.length > 0 && inner[0]?.description) {
+            arr = inner // use the inner array instead
+          }
+        } catch { /* keep outer array */ }
+      }
 
-    // Filter out parse-error entries
-    const filtered = arr
-      .filter((item: any) => {
-        const desc = String(item.description || '')
-        return !desc.trim().startsWith('[') && !desc.trim().startsWith('{') && !desc.includes('Parse error:')
+      // Must look like RCA entries (have description field)
+      if (!arr[0]?.description) return null
+
+      // Filter out parse-error entries
+      const filtered = arr
+        .filter((item: any) => {
+          const desc = String(item.description || '')
+          return !desc.trim().startsWith('[') && !desc.trim().startsWith('{') && !desc.includes('Parse error:')
       })
       .map((item: any) => ({
         description: String(item.description || ''),
@@ -210,6 +211,11 @@ function mapIncident(raw: any): Incident {
       }))
       .filter(item => item.description.length > 0)
     return filtered.length > 0 ? filtered : null
+    } catch (e) {
+      // If root cause parsing fails, return null (will use raw string instead)
+      console.warn('[tryParseRootCauses] failed:', e)
+      return null
+    }
   }
 
   const parsed = tryParseRootCauses(rawRootCause)

@@ -207,6 +207,9 @@ aws secretsmanager update-secret \
 - **Deduplication** - Uses incident_id as dedup_key to prevent duplicates
 - **Dashboard Link** - Included in custom_details for quick access
 - **Real-time Alerts** - Immediate notification via PagerDuty mobile app
+- **Direct Ticket Links** - "Open in PagerDuty" links go directly to the ticket page
+
+> **Note:** PagerDuty free/trial plans have a limit on concurrent open incidents (~50). Events are accepted but may not create incidents beyond this limit.
 
 ---
 
@@ -277,6 +280,7 @@ React 18 + TypeScript + Vite + Tailwind CSS
 | **Dashboard** | Active incidents, service risk heatmap, business impact |
 | **Incident Detail** | Full investigation with 6 sources, recommendations, tickets |
 | **Postmortems** | AI-generated reports with prevention steps |
+| **Notifications** | Jira tickets, PagerDuty incidents, SNS notifications (tabbed view) |
 
 ### Incident Detail Sections
 
@@ -288,7 +292,7 @@ React 18 + TypeScript + Vite + Tailwind CSS
 | **X-Ray Traces** | Error traces, slow traces, service stats, insights |
 | **AWS Config** | Non-compliant resources, recent changes, violations |
 | **SNS Notification** | Recipient, subject, full message, sent timestamp |
-| **Ticket** | Jira + PagerDuty links and status |
+| **Ticket** | Jira + PagerDuty links with direct ticket page access |
 | **Business Impact** | Revenue at risk, affected users, SLA status |
 
 ---
