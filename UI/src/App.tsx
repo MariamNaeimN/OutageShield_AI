@@ -9,7 +9,6 @@ import SnsDetail from './pages/SnsDetail'
 import PagerDutyDetail from './pages/PagerDutyDetail'
 import Postmortems from './pages/Postmortems'
 import Notifications from './pages/Notifications'
-
 import Login from './pages/Login'
 import { getCurrentUser, logout, type AuthUser } from './services/auth'
 
@@ -32,7 +31,6 @@ export default function App() {
           <Route path="pagerduty/:id" element={<PagerDutyDetail />} />
           <Route path="postmortems" element={<Postmortems />} />
           <Route path="notifications" element={<Notifications />} />
-
         </Route>
       </Routes>
     </BrowserRouter>

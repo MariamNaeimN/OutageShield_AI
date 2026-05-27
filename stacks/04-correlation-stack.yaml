@@ -75,12 +75,14 @@ Resources:
               signal = event.get('signal', event)
               service = signal.get('service', 'unknown')
               incident_id = signal.get('signal_id', str(uuid.uuid4())[:8])
+              alarm_name = signal.get('alarm_name', '')  # Get alarm_name from signal
               now = datetime.now(timezone.utc).isoformat()
 
               incident_context = {
                   'context_id': str(uuid.uuid4()),
                   'signal': signal,
                   'service': service,
+                  'alarm_name': alarm_name,
                   'timestamp': now,
                   'deployments': [],
                   'config_changes': [],
@@ -89,11 +91,12 @@ Resources:
                   'unavailable_sources': []
               }
 
-              # Store incident in DynamoDB
+              # Store incident in DynamoDB with alarm_name
               inc_table = dynamodb.Table(os.environ['INCIDENTS_TABLE'])
               inc_table.put_item(Item={
                   'incident_id': incident_id,
                   'service': service,
+                  'alarm_name': alarm_name,  # Store alarm_name for runbook lookup
                   'title': f"Outage signal on {service}",
                   'severity_score': int(signal.get('severity_score', 3)),
                   'business_impact_score': 5,

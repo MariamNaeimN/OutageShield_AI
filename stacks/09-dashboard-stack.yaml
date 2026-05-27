@@ -2,7 +2,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   OutageShield AI - Dashboard Stack
   API Gateway and Lambda backend for the Incident Command Dashboard.
-  Serves: /incidents, /incidents/{id}, /risk, /postmortems, /events
+  Serves: /incidents, /incidents/{id}, /risk, /postmortems, /events, /ai-reasoning/{id}
 
 Parameters:
   Environment:
@@ -63,6 +63,12 @@ Resources:
                   - dynamodb:GetItem
                   - dynamodb:Scan
                 Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/outageshield-postmortems-${Environment}
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/outageshield-ai-reasoning-${Environment}
               - Effect: Allow
                 Action:
                   - es:ESHttpGet
@@ -341,6 +347,33 @@ Resources:
         IntegrationHttpMethod: POST
         Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DashboardApiLambda.Arn}/invocations
 
+  # AI Reasoning endpoint
+  AiReasoningResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DashboardApi
+      ParentId: !GetAtt DashboardApi.RootResourceId
+      PathPart: ai-reasoning
+
+  AiReasoningIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref DashboardApi
+      ParentId: !Ref AiReasoningResource
+      PathPart: '{id}'
+
+  AiReasoningMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref DashboardApi
+      ResourceId: !Ref AiReasoningIdResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DashboardApiLambda.Arn}/invocations
+
   ApiDeployment:
     Type: AWS::ApiGateway::Deployment
     DependsOn:
@@ -348,6 +381,7 @@ Resources:
       - RiskMethod
       - PostmortemsMethod
       - EventsMethod
+      - AiReasoningMethod
     Properties:
       RestApiId: !Ref DashboardApi
 

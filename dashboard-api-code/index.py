@@ -7,7 +7,7 @@ dynamodb = boto3.resource('dynamodb')
 def lambda_handler(event, context):
     """
     Dashboard API: Serves data for the Incident Command Dashboard.
-    Routes: /incidents, /incidents/{id}, /risk, /postmortems, /events
+    Routes: /incidents, /incidents/{id}, /risk, /postmortems, /events, /ai-reasoning/{id}
     """
     path = event.get('path', '/')
     method = event.get('httpMethod', 'GET')
@@ -23,6 +23,9 @@ def lambda_handler(event, context):
         return get_postmortems()
     elif path == '/events' and method == 'GET':
         return get_events()
+    elif path.startswith('/ai-reasoning/') and method == 'GET':
+        incident_id = path.split('/')[-1]
+        return get_ai_reasoning(incident_id)
     else:
         return response(404, {'error': 'Not found'})
 
@@ -136,6 +139,39 @@ def get_events():
         result = table.scan(ExclusiveStartKey=result['LastEvaluatedKey'])
         items.extend(result.get('Items', []))
     return response(200, {'events': items, 'count': len(items)})
+
+def get_ai_reasoning(incident_id):
+    """Get AI reasoning data for an incident from the ai-reasoning table."""
+    table = dynamodb.Table(os.environ.get('AI_REASONING_TABLE', 'outageshield-ai-reasoning-dev'))
+    # Table has composite key (incident_id, created_at), so we query by incident_id
+    # and get the most recent entry
+    result = table.query(
+        KeyConditionExpression='incident_id = :iid',
+        ExpressionAttributeValues={':iid': incident_id},
+        ScanIndexForward=False,  # Sort descending by created_at
+        Limit=1
+    )
+    items = result.get('Items', [])
+    if items:
+        item = items[0]
+        # Parse JSON strings in the response
+        if 'quick_actions' in item and isinstance(item['quick_actions'], str):
+            try:
+                item['quick_actions'] = json.loads(item['quick_actions'])
+            except:
+                pass
+        if 'recommended_action' in item and isinstance(item['recommended_action'], str):
+            try:
+                item['recommended_action'] = json.loads(item['recommended_action'])
+            except:
+                pass
+        if 'recommendation_breakdown' in item and isinstance(item['recommendation_breakdown'], str):
+            try:
+                item['recommendation_breakdown'] = json.loads(item['recommendation_breakdown'])
+            except:
+                pass
+        return response(200, item)
+    return response(404, {'error': 'AI reasoning not found for this incident'})
 
 def response(status_code, body):
     return {

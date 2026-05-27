@@ -1,7 +1,9 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: >
   OutageShield AI - Orchestration Stack
-  Full 9-step incident investigation workflow with DynamoDB writes at each step.
+  Full incident investigation workflow with DynamoDB writes at each step.
+  Includes human approval gate with waitForTaskToken pattern.
+  Updated: Uses comprehensive workflow from incident-workflow.asl.json
 
 Parameters:
   Environment:
@@ -10,7 +12,197 @@ Parameters:
     AllowedValues: [dev, staging, prod]
     Description: Deployment environment
 
+  RetentionDays:
+    Type: Number
+    Default: 14
+    Description: CloudWatch log retention in days
+
 Resources:
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Workflow State Table (for dashboard updates)
+  # ─────────────────────────────────────────────────────────────────────────────
+  WorkflowStateTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub outageshield-workflow-state-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: workflow_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: workflow_id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Approval Lambda Role
+  # ─────────────────────────────────────────────────────────────────────────────
+  ApprovalLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub outageshield-approval-role-${Environment}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ApprovalPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:SendTaskSuccess
+                  - states:SendTaskFailure
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/outageshield-approvals-${Environment}
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !ImportValue
+                    Fn::Sub: outageshield-notifications-${Environment}-TopicArn
+                  - !ImportValue
+                    Fn::Sub: outageshield-notifications-${Environment}-EscalationTopicArn
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Approvals DynamoDB Table
+  # ─────────────────────────────────────────────────────────────────────────────
+  ApprovalsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub outageshield-approvals-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: approval_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: approval_id
+          KeyType: HASH
+      SSESpecification:
+        SSEEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Approval Lambda Function
+  # ─────────────────────────────────────────────────────────────────────────────
+  ApprovalLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub outageshield-approval-${Environment}
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt ApprovalLambdaRole.Arn
+      Timeout: 30
+      MemorySize: 256
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          APPROVALS_TABLE: !Ref ApprovalsTable
+          APPROVAL_TOPIC_ARN: !ImportValue
+            Fn::Sub: outageshield-notifications-${Environment}-TopicArn
+          ESCALATION_TOPIC_ARN: !ImportValue
+            Fn::Sub: outageshield-notifications-${Environment}-EscalationTopicArn
+          DASHBOARD_URL: https://d2k1km1tzlio49.cloudfront.net
+          ESCALATION_MINUTES: '10'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import uuid
+          from datetime import datetime, timezone, timedelta
+
+          sfn = boto3.client('stepfunctions')
+          dynamodb = boto3.resource('dynamodb')
+          sns = boto3.client('sns')
+
+          APPROVALS_TABLE = os.environ.get('APPROVALS_TABLE', 'outageshield-approvals')
+          APPROVAL_TOPIC_ARN = os.environ.get('APPROVAL_TOPIC_ARN', '')
+          ESCALATION_TOPIC_ARN = os.environ.get('ESCALATION_TOPIC_ARN', '')
+          DASHBOARD_URL = os.environ.get('DASHBOARD_URL', 'https://outageshield.example.com')
+          ESCALATION_MINUTES = int(os.environ.get('ESCALATION_MINUTES', '10'))
+
+          def lambda_handler(event, context):
+              if 'task_token' in event:
+                  return handle_send_approval(event)
+              elif event.get('mode') == 'respond':
+                  return handle_approval_response(event)
+              else:
+                  return {'statusCode': 400, 'body': 'Unknown mode'}
+
+          def handle_send_approval(event):
+              task_token = event['task_token']
+              incident_id = event['incident_id']
+              service = event['service']
+              proposed_action = event.get('proposed_action', {})
+              risk_level = event.get('risk_level', 'medium')
+              approval_id = str(uuid.uuid4())[:8]
+
+              table = dynamodb.Table(APPROVALS_TABLE)
+              table.put_item(Item={
+                  'approval_id': approval_id, 'incident_id': incident_id, 'task_token': task_token,
+                  'service': service, 'proposed_action': json.dumps(proposed_action), 'risk_level': risk_level,
+                  'status': 'pending', 'created_at': datetime.now(timezone.utc).isoformat(), 'escalated': False,
+                  'ttl': int((datetime.now(timezone.utc) + timedelta(days=7)).timestamp())
+              })
+
+              approve_url = f"{DASHBOARD_URL}/approve/{approval_id}?decision=approved"
+              reject_url = f"{DASHBOARD_URL}/approve/{approval_id}?decision=rejected"
+              message = f"REMEDIATION APPROVAL REQUIRED\n\nIncident: {incident_id}\nService: {service}\nRisk: {risk_level}\n\nAPPROVE: {approve_url}\nREJECT: {reject_url}\n\nDashboard: {DASHBOARD_URL}/incidents/{incident_id}"
+
+              if APPROVAL_TOPIC_ARN:
+                  sns.publish(TopicArn=APPROVAL_TOPIC_ARN, Subject=f"[APPROVAL NEEDED] {service}", Message=message)
+              print(f"Approval request sent. ID: {approval_id}")
+
+          def handle_approval_response(event):
+              approval_id = event['approval_id']
+              decision = event['decision']
+              responder = event.get('responder', 'unknown')
+
+              table = dynamodb.Table(APPROVALS_TABLE)
+              response = table.get_item(Key={'approval_id': approval_id})
+              item = response.get('Item')
+              if not item:
+                  return {'statusCode': 404, 'body': 'Not found'}
+              if item['status'] != 'pending':
+                  return {'statusCode': 409, 'body': f"Already {item['status']}"}
+
+              task_token = item['task_token']
+              table.update_item(Key={'approval_id': approval_id}, UpdateExpression='SET #s = :status, responded_at = :ts, responder = :resp',
+                  ExpressionAttributeNames={'#s': 'status'}, ExpressionAttributeValues={':status': decision, ':ts': datetime.now(timezone.utc).isoformat(), ':resp': responder})
+
+              if decision == 'approved':
+                  sfn.send_task_success(taskToken=task_token, output=json.dumps({'decision': 'approved', 'responder': responder}))
+              else:
+                  sfn.send_task_failure(taskToken=task_token, error='ApprovalRejected', cause=f'Rejected by {responder}')
+              return {'statusCode': 200, 'body': json.dumps({'approval_id': approval_id, 'decision': decision})}
+
+  ApprovalLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/outageshield-approval-${Environment}
+      RetentionInDays: !Ref RetentionDays
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Step Functions Execution Role
@@ -53,6 +245,9 @@ Resources:
                     Fn::Sub: outageshield-remediation-${Environment}-ExecutorLambdaArn
                   - !ImportValue
                     Fn::Sub: outageshield-bedrock-agent-${Environment}-InvokerLambdaArn
+                  - !ImportValue
+                    Fn::Sub: outageshield-reasoning-${Environment}-SummaryLambdaArn
+                  - !GetAtt ApprovalLambda.Arn
               - Effect: Allow
                 Action:
                   - dynamodb:PutItem
@@ -61,6 +256,7 @@ Resources:
                 Resource:
                   - !ImportValue
                     Fn::Sub: outageshield-storage-${Environment}-IncidentsTableArn
+                  - !GetAtt WorkflowStateTable.Arn
               - Effect: Allow
                 Action:
                   - xray:PutTraceSegments
@@ -70,7 +266,8 @@ Resources:
                 Resource: '*'
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Full 9-Step Incident Investigation State Machine
+  # Full Incident Investigation State Machine
+  # Uses comprehensive workflow with dashboard updates, escalation, and approval gates
   # ─────────────────────────────────────────────────────────────────────────────
   IncidentWorkflowStateMachine:
     Type: AWS::StepFunctions::StateMachine
@@ -83,174 +280,297 @@ Resources:
         Fn::Sub:
           - |
             {
-              "Comment": "OutageShield AI - Full 9-Step Incident Investigation. Each Lambda writes to DynamoDB. incident_id passed through all steps via $.signal.signal_id.",
-              "StartAt": "Step1_Correlate",
+              "Comment": "OutageShield AI - Full Incident Investigation Workflow with Dashboard Updates and Human Approval",
+              "StartAt": "InitializeIncident",
               "States": {
-                "Step1_Correlate": {
+                "InitializeIncident": {
                   "Type": "Task",
-                  "Comment": "1. Correlate: Gather logs, metrics, traces, deployments, config changes. Creates incident record in DynamoDB.",
-                  "Resource": "${CorrelationArn}",
-                  "TimeoutSeconds": 120,
-                  "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 2}],
-                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Fail_Correlate", "ResultPath": "$.error"}],
-                  "ResultPath": "$.step1",
-                  "Next": "Step2_Score"
-                },
-                "Fail_Correlate": {
-                  "Type": "Pass",
-                  "Result": {"status": "failed", "step": "correlate"},
-                  "ResultPath": "$.step1",
-                  "Next": "Step2_Score"
+                  "Comment": "Create incident record in DynamoDB, set status to investigating",
+                  "Resource": "arn:aws:states:::dynamodb:putItem",
+                  "Parameters": {
+                    "TableName": "${IncidentsTable}",
+                    "Item": {
+                      "incident_id": {"S.$": "$.signal.signal_id"},
+                      "service": {"S.$": "$.signal.service"},
+                      "severity_score": {"N.$": "States.Format('{}', $.signal.severity_score)"},
+                      "status": {"S": "investigating"},
+                      "created_at": {"S.$": "$$.State.EnteredTime"},
+                      "workflow_id": {"S.$": "$$.Execution.Id"}
+                    }
+                  },
+                  "ResultPath": "$.init_result",
+                  "Next": "CorrelateContext"
                 },
 
-                "Step2_Score": {
+                "CorrelateContext": {
                   "Type": "Task",
-                  "Comment": "2. Score Incident: Severity, Impact, Affected Users, Business Impact. Writes scores to DynamoDB.",
+                  "Comment": "Build Incident Context from deployments, config changes, past incidents, logs, traces",
+                  "Resource": "${CorrelationArn}",
+                  "TimeoutSeconds": 120,
+                  "Retry": [{"ErrorEquals": ["States.TaskFailed", "States.Timeout"], "IntervalSeconds": 5, "MaxAttempts": 2}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "HandleCorrelationFailure", "ResultPath": "$.error"}],
+                  "ResultPath": "$.step1",
+                  "Next": "UpdateDashboard_Correlation"
+                },
+
+                "HandleCorrelationFailure": {
+                  "Type": "Pass",
+                  "Result": {"step": "correlation", "status": "failed", "incident_context": {"unavailable_sources": ["all"]}},
+                  "ResultPath": "$.step1",
+                  "Next": "UpdateDashboard_Correlation"
+                },
+
+                "UpdateDashboard_Correlation": {
+                  "Type": "Task",
+                  "Resource": "arn:aws:states:::dynamodb:updateItem",
+                  "Parameters": {
+                    "TableName": "${WorkflowStateTable}",
+                    "Key": {"workflow_id": {"S.$": "$$.Execution.Id"}},
+                    "UpdateExpression": "SET current_step = :step, correlation_completed_at = :ts",
+                    "ExpressionAttributeValues": {":step": {"S": "scoring"}, ":ts": {"S.$": "$$.State.EnteredTime"}}
+                  },
+                  "ResultPath": "$.dashboard_update",
+                  "Next": "ScoreIncident"
+                },
+                "ScoreIncident": {
+                  "Type": "Task",
+                  "Comment": "Calculate Severity (1-5) and Business Impact (1-10)",
                   "Resource": "${ScoringArn}",
                   "TimeoutSeconds": 60,
                   "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 10, "MaxAttempts": 5, "BackoffRate": 2.0}],
-                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Fail_Score", "ResultPath": "$.error"}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "HandleScoringFailure", "ResultPath": "$.error"}],
                   "ResultPath": "$.step2",
-                  "Next": "Step3_RootCause"
-                },
-                "Fail_Score": {
-                  "Type": "Pass",
-                  "Result": {"status": "failed", "step": "score", "severity_score": 3, "business_impact_score": 5},
-                  "ResultPath": "$.step2",
-                  "Next": "Step3_RootCause"
+                  "Next": "CheckEscalation"
                 },
 
-                "Step3_RootCause": {
+                "HandleScoringFailure": {
+                  "Type": "Pass",
+                  "Result": {"step": "scoring", "status": "failed", "severity_score": 3, "business_impact_score": 5},
+                  "ResultPath": "$.step2",
+                  "Next": "CheckEscalation"
+                },
+
+                "CheckEscalation": {
+                  "Type": "Choice",
+                  "Comment": "If severity >= 4, send escalation alert before continuing",
+                  "Choices": [{"Variable": "$.step2.severity_score", "NumericGreaterThanEquals": 4, "Next": "SendEscalationAlert"}],
+                  "Default": "AnalyzeRootCause"
+                },
+
+                "SendEscalationAlert": {
                   "Type": "Task",
-                  "Comment": "3. Root Cause Analysis: Amazon Bedrock analyzes all context. Writes root cause + confidence to DynamoDB.",
+                  "Resource": "${NotificationArn}",
+                  "Parameters": {
+                    "type": "escalation",
+                    "severity_score.$": "$.step2.severity_score",
+                    "business_impact_score.$": "$.step2.business_impact_score",
+                    "service.$": "$.signal.service",
+                    "incident_id.$": "$.signal.signal_id"
+                  },
+                  "TimeoutSeconds": 30,
+                  "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 2}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "AnalyzeRootCause", "ResultPath": "$.escalation_error"}],
+                  "ResultPath": "$.escalation_result",
+                  "Next": "AnalyzeRootCause"
+                },
+
+                "AnalyzeRootCause": {
+                  "Type": "Task",
+                  "Comment": "Bedrock root-cause analysis — ranked causes with confidence scores",
                   "Resource": "${RootCauseArn}",
                   "TimeoutSeconds": 120,
                   "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 10, "MaxAttempts": 5, "BackoffRate": 2.0}],
-                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Fail_RootCause", "ResultPath": "$.error"}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "HandleRCAFailure", "ResultPath": "$.error"}],
                   "ResultPath": "$.step3",
-                  "Next": "Step3b_AgentInvestigation"
-                },
-                "Fail_RootCause": {
-                  "Type": "Pass",
-                  "Result": {"status": "failed", "step": "root_cause"},
-                  "ResultPath": "$.step3",
-                  "Next": "Step3b_AgentInvestigation"
+                  "Next": "AgentInvestigation"
                 },
 
-                "Step3b_AgentInvestigation": {
+                "HandleRCAFailure": {
+                  "Type": "Pass",
+                  "Result": {"step": "root_cause_analysis", "status": "failed", "root_causes": []},
+                  "ResultPath": "$.step3",
+                  "Next": "AgentInvestigation"
+                },
+
+                "AgentInvestigation": {
                   "Type": "Task",
-                  "Comment": "3b. Bedrock Agent Deep Investigation: Autonomously searches past incidents, logs, runbooks, and deployments for deeper analysis.",
+                  "Comment": "Bedrock Agent Deep Investigation: searches past incidents, logs, runbooks, deployments",
                   "Resource": "${AgentInvokerArn}",
                   "TimeoutSeconds": 120,
                   "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 10, "MaxAttempts": 2}],
-                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Step4_Remediation", "ResultPath": "$.agent_error"}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "RecommendRemediation", "ResultPath": "$.agent_error"}],
                   "ResultPath": "$.step3b",
-                  "Next": "Step4_Remediation"
+                  "Next": "RecommendRemediation"
                 },
 
-                "Step4_Remediation": {
+                "RecommendRemediation": {
                   "Type": "Task",
-                  "Comment": "4. Recommend Remediation: Ranked options with confidence, risk, ETA. Writes recommendations to DynamoDB.",
+                  "Comment": "Generate 1-5 ranked remediation recommendations",
                   "Resource": "${RemediationArn}",
                   "TimeoutSeconds": 120,
                   "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 10, "MaxAttempts": 5, "BackoffRate": 2.0}],
-                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Fail_Remediation", "ResultPath": "$.error"}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "HandleRemediationFailure", "ResultPath": "$.error"}],
                   "ResultPath": "$.step4",
-                  "Next": "Step5_CheckApproval"
-                },
-                "Fail_Remediation": {
-                  "Type": "Pass",
-                  "Result": {"status": "failed", "step": "remediation"},
-                  "ResultPath": "$.step4",
-                  "Next": "Step5_CheckApproval"
+                  "Next": "GenerateSummary"
                 },
 
-                "Step5_CheckApproval": {
+                "HandleRemediationFailure": {
+                  "Type": "Pass",
+                  "Result": {"step": "remediation_recommendation", "status": "failed", "recommendations": []},
+                  "ResultPath": "$.step4",
+                  "Next": "GenerateSummary"
+                },
+
+                "GenerateSummary": {
+                  "Type": "Task",
+                  "Comment": "Generate AI-powered summary with best remediation suggestion",
+                  "Resource": "${SummaryArn}",
+                  "TimeoutSeconds": 90,
+                  "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 2}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "CheckAutoRemediation", "ResultPath": "$.summary_error"}],
+                  "ResultPath": "$.step4b",
+                  "Next": "CheckAutoRemediation"
+                },
+
+                "CheckAutoRemediation": {
                   "Type": "Choice",
-                  "Comment": "5. Check if auto-remediation enabled. If yes, workflow would pause for human approval (waitForTaskToken in production). For demo, skip to ticket.",
-                  "Choices": [
-                    {
-                      "Variable": "$.signal.auto_remediation_enabled",
-                      "BooleanEquals": true,
-                      "Next": "Step5_AwaitApproval"
+                  "Comment": "If auto-remediation enabled, go to human approval gate",
+                  "Choices": [{"Variable": "$.signal.auto_remediation_enabled", "BooleanEquals": true, "Next": "WaitForHumanApproval"}],
+                  "Default": "CreateTicket"
+                },
+
+                "WaitForHumanApproval": {
+                  "Type": "Task",
+                  "Comment": "HUMAN GATE: Pauses workflow until approver responds",
+                  "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+                  "Parameters": {
+                    "FunctionName": "${ApprovalArn}",
+                    "Payload": {
+                      "task_token.$": "$$.Task.Token",
+                      "incident_id.$": "$.signal.signal_id",
+                      "service.$": "$.signal.service",
+                      "severity_score.$": "$.step2.severity_score",
+                      "proposed_action.$": "$.step4.recommendations[0]",
+                      "risk_level.$": "$.step4.recommendations[0].risk",
+                      "workflow_id.$": "$$.Execution.Id"
                     }
+                  },
+                  "ResultPath": "$.approval_response",
+                  "Catch": [
+                    {"ErrorEquals": ["ApprovalRejected"], "Next": "ApprovalRejected", "ResultPath": "$.approval_error"},
+                    {"ErrorEquals": ["States.ALL"], "Next": "ApprovalRejected", "ResultPath": "$.approval_error"}
                   ],
-                  "Default": "Step7_CreateTicket"
+                  "Next": "ExecuteRemediation"
                 },
 
-                "Step5_AwaitApproval": {
-                  "Type": "Pass",
-                  "Comment": "5. Human Approval Gate: In production uses .waitForTaskToken to pause indefinitely. For demo, auto-approves and continues.",
-                  "Result": {"decision": "auto_approved_demo", "status": "approved"},
-                  "ResultPath": "$.step5",
-                  "Next": "Step6_Execute"
-                },
-
-                "Step6_Execute": {
+                "ExecuteRemediation": {
                   "Type": "Task",
-                  "Comment": "6. Execute Remediation: Calls Remediation Executor Lambda which uses AWS Systems Manager to perform rollback, scaling, or config changes.",
+                  "Comment": "Execute the approved remediation action via Systems Manager",
                   "Resource": "${RemediationExecutorArn}",
+                  "Parameters": {
+                    "incident_id.$": "$.signal.signal_id",
+                    "action.$": "$.step4.recommendations[0]",
+                    "service.$": "$.signal.service"
+                  },
                   "TimeoutSeconds": 300,
-                  "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 10, "MaxAttempts": 2}],
-                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Step7_CreateTicket", "ResultPath": "$.remediation_error"}],
+                  "Retry": [{"ErrorEquals": ["States.TaskFailed"], "IntervalSeconds": 10, "MaxAttempts": 1}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "HandleExecutionFailure", "ResultPath": "$.execution_error"}],
                   "ResultPath": "$.step6",
-                  "Next": "Step7_CreateTicket"
+                  "Next": "CreateTicket"
                 },
 
-                "Step7_CreateTicket": {
+                "HandleExecutionFailure": {
+                  "Type": "Pass",
+                  "Result": {"execution_status": "failed"},
+                  "ResultPath": "$.step6",
+                  "Next": "CreateTicket"
+                },
+
+                "ApprovalRejected": {
+                  "Type": "Pass",
+                  "Result": {"execution_status": "rejected_by_approver"},
+                  "ResultPath": "$.step6",
+                  "Next": "CreateTicket"
+                },
+
+                "CreateTicket": {
                   "Type": "Task",
-                  "Comment": "7. Create Ticket: Jira/ServiceNow. Writes ticket_id, ticket_status, ticket_url to DynamoDB.",
+                  "Comment": "Create ticket in Jira/PagerDuty",
                   "Resource": "${TicketArn}",
                   "TimeoutSeconds": 60,
                   "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 10, "MaxAttempts": 3}],
-                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Step8_Notify", "ResultPath": "$.ticket_error"}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "NotifyTeam", "ResultPath": "$.ticket_error"}],
                   "ResultPath": "$.step7",
-                  "Next": "Step8_Notify"
+                  "Next": "NotifyTeam"
                 },
 
-                "Step8_Notify": {
+                "NotifyTeam": {
                   "Type": "Task",
-                  "Comment": "8. Notify Team: SNS Alerts (Slack, PagerDuty, Email). Writes notification records to DynamoDB.",
+                  "Comment": "Send incident alert via SNS",
                   "Resource": "${NotificationArn}",
+                  "Parameters": {
+                    "type": "alert",
+                    "service.$": "$.signal.service",
+                    "incident_id.$": "$.signal.signal_id",
+                    "severity_score.$": "$.step2.severity_score",
+                    "timestamp.$": "$.signal.timestamp",
+                    "signal.$": "$.signal",
+                    "step2.$": "$.step2",
+                    "step3.$": "$.step3",
+                    "step7.$": "$.step7"
+                  },
                   "TimeoutSeconds": 30,
                   "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 3}],
-                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Step9_Postmortem", "ResultPath": "$.notify_error"}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "GeneratePostmortem", "ResultPath": "$.notify_error"}],
                   "ResultPath": "$.step8",
-                  "Next": "Step9_Postmortem"
+                  "Next": "GeneratePostmortem"
                 },
 
-                "Step9_Postmortem": {
+                "GeneratePostmortem": {
                   "Type": "Task",
-                  "Comment": "9. Generate Postmortem: AI Summary & Prevention Steps. Writes to postmortems table.",
+                  "Comment": "Generate AI postmortem using all previous step data",
                   "Resource": "${PostmortemArn}",
                   "TimeoutSeconds": 120,
                   "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 10, "MaxAttempts": 5, "BackoffRate": 2.0}],
-                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "Step10_Done", "ResultPath": "$.postmortem_error"}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "WorkflowComplete", "ResultPath": "$.postmortem_error"}],
                   "ResultPath": "$.step9",
-                  "Next": "Step10_Done"
+                  "Next": "WorkflowComplete"
                 },
 
-                "Step10_Done": {
-                  "Type": "Pass",
-                  "Comment": "10. Workflow Complete.",
-                  "Result": {"workflow_status": "completed"},
-                  "ResultPath": "$.step10",
+                "WorkflowComplete": {
+                  "Type": "Task",
+                  "Comment": "Update incident status to mitigating",
+                  "Resource": "arn:aws:states:::dynamodb:updateItem",
+                  "Parameters": {
+                    "TableName": "${IncidentsTable}",
+                    "Key": {"incident_id": {"S.$": "$.signal.signal_id"}},
+                    "UpdateExpression": "SET #s = :status, workflow_status = :ws, completed_at = :ts",
+                    "ExpressionAttributeNames": {"#s": "status"},
+                    "ExpressionAttributeValues": {":status": {"S": "mitigating"}, ":ws": {"S": "completed"}, ":ts": {"S.$": "$$.State.EnteredTime"}}
+                  },
+                  "ResultPath": "$.final_update",
                   "End": true
                 }
               }
             }
-          - CorrelationArn: !ImportValue
+          - IncidentsTable: !ImportValue
+              Fn::Sub: outageshield-storage-${Environment}-IncidentsTableName
+            WorkflowStateTable: !Ref WorkflowStateTable
+            CorrelationArn: !ImportValue
               Fn::Sub: outageshield-correlation-${Environment}-LambdaArn
             ScoringArn: !ImportValue
               Fn::Sub: outageshield-reasoning-${Environment}-ScoringLambdaArn
             RootCauseArn: !ImportValue
               Fn::Sub: outageshield-reasoning-${Environment}-RootCauseLambdaArn
-            RemediationArn: !ImportValue
-              Fn::Sub: outageshield-reasoning-${Environment}-RemediationLambdaArn
-            RemediationExecutorArn: !ImportValue
-              Fn::Sub: outageshield-remediation-${Environment}-ExecutorLambdaArn
             AgentInvokerArn: !ImportValue
               Fn::Sub: outageshield-bedrock-agent-${Environment}-InvokerLambdaArn
+            RemediationArn: !ImportValue
+              Fn::Sub: outageshield-reasoning-${Environment}-RemediationLambdaArn
+            SummaryArn: !ImportValue
+              Fn::Sub: outageshield-reasoning-${Environment}-SummaryLambdaArn
+            RemediationExecutorArn: !ImportValue
+              Fn::Sub: outageshield-remediation-${Environment}-ExecutorLambdaArn
+            ApprovalArn: !GetAtt ApprovalLambda.Arn
             TicketArn: !ImportValue
               Fn::Sub: outageshield-notifications-${Environment}-TicketLambdaArn
             NotificationArn: !ImportValue
@@ -264,3 +584,21 @@ Outputs:
     Value: !GetAtt IncidentWorkflowStateMachine.Arn
     Export:
       Name: !Sub outageshield-orchestration-${Environment}-StateMachineArn
+
+  WorkflowStateTableArn:
+    Description: Workflow State Table ARN
+    Value: !GetAtt WorkflowStateTable.Arn
+    Export:
+      Name: !Sub outageshield-orchestration-${Environment}-WorkflowStateTableArn
+
+  ApprovalsTableArn:
+    Description: Approvals Table ARN
+    Value: !GetAtt ApprovalsTable.Arn
+    Export:
+      Name: !Sub outageshield-orchestration-${Environment}-ApprovalsTableArn
+
+  ApprovalLambdaArn:
+    Description: Approval Lambda ARN
+    Value: !GetAtt ApprovalLambda.Arn
+    Export:
+      Name: !Sub outageshield-orchestration-${Environment}-ApprovalLambdaArn

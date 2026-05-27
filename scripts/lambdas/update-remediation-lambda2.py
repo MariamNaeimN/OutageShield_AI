@@ -73,105 +73,249 @@ def generate_ai_recommendations(sources, root_causes, service, alarm_name):
     Each recommendation is directly derived from the tool output data."""
     
     recommendations = []
+    alarm_lower = (alarm_name or '').lower()
+    
+    # 0. ALARM-TYPE BASED RECOMMENDATIONS - Add specific recommendations based on alarm type
+    if 'highlatency' in alarm_lower or 'latency' in alarm_lower:
+        recommendations.append({
+            'category': 'scaling',
+            'description': f'High latency detected on {service}. Consider horizontal scaling to handle increased load, or optimize slow database queries and API calls.',
+            'reasoning': f'Alarm type "{alarm_name}" indicates latency issues that often benefit from scaling.',
+            'source': 'AGENT:alarm_analysis',
+            'effectiveness': 4,
+            'risk': 'low',
+            'estimated_ttr_minutes': 15,
+            'confidence': 80
+        })
+    
+    if 'high5xx' in alarm_lower or '5xx' in alarm_lower or 'error' in alarm_lower:
+        recommendations.append({
+            'category': 'rollback',
+            'description': f'High error rate on {service}. If errors started after a recent deployment, consider rolling back to the previous stable version.',
+            'reasoning': f'Alarm type "{alarm_name}" suggests application errors that may be caused by a bad deployment.',
+            'source': 'AGENT:alarm_analysis',
+            'effectiveness': 5,
+            'risk': 'medium',
+            'estimated_ttr_minutes': 10,
+            'confidence': 75
+        })
+    
+    if 'connectionpool' in alarm_lower or 'connection' in alarm_lower or 'database' in alarm_lower:
+        recommendations.append({
+            'category': 'scaling',
+            'description': f'Database connection issues on {service}. Scale database read replicas or increase connection pool limits.',
+            'reasoning': f'Alarm type "{alarm_name}" indicates database capacity issues.',
+            'source': 'AGENT:alarm_analysis',
+            'effectiveness': 4,
+            'risk': 'low',
+            'estimated_ttr_minutes': 20,
+            'confidence': 80
+        })
+    
+    if 'queuebacklog' in alarm_lower or 'queue' in alarm_lower or 'backlog' in alarm_lower:
+        recommendations.append({
+            'category': 'scaling',
+            'description': f'Message queue backlog on {service}. Scale consumer instances or increase processing capacity.',
+            'reasoning': f'Alarm type "{alarm_name}" indicates queue processing cannot keep up with incoming messages.',
+            'source': 'AGENT:alarm_analysis',
+            'effectiveness': 4,
+            'risk': 'low',
+            'estimated_ttr_minutes': 15,
+            'confidence': 85
+        })
+    
+    if 'highcpu' in alarm_lower or 'cpu' in alarm_lower or 'memory' in alarm_lower:
+        recommendations.append({
+            'category': 'scaling',
+            'description': f'Resource exhaustion on {service}. Scale vertically (larger instance) or horizontally (more instances).',
+            'reasoning': f'Alarm type "{alarm_name}" indicates compute resource constraints.',
+            'source': 'AGENT:alarm_analysis',
+            'effectiveness': 4,
+            'risk': 'low',
+            'estimated_ttr_minutes': 15,
+            'confidence': 85
+        })
+    
+    if 'cachemiss' in alarm_lower or 'cache' in alarm_lower:
+        recommendations.append({
+            'category': 'configuration_change',
+            'description': f'High cache miss rate on {service}. Review cache TTL settings, increase cache size, or warm the cache.',
+            'reasoning': f'Alarm type "{alarm_name}" indicates caching inefficiency.',
+            'source': 'AGENT:alarm_analysis',
+            'effectiveness': 3,
+            'risk': 'low',
+            'estimated_ttr_minutes': 20,
+            'confidence': 75
+        })
     
     # 1. DEPLOYMENT CORRELATION - check for actual deployment data
     deployment_data = sources.get('deployment', '')
-    if deployment_data and not is_no_data(deployment_data):
+    deployment_lower = deployment_data.lower() if deployment_data else ''
+    
+    # Check if this is a "no deployment" message
+    no_deploy_indicators = [
+        'no recent deployment',
+        'no deployments',
+        'no deployment found',
+        'no config changes',
+        'no configuration changes',
+        'not found',
+        'no data'
+    ]
+    is_no_deployment = any(ind in deployment_lower for ind in no_deploy_indicators)
+    
+    if deployment_data and not is_no_data(deployment_data) and not is_no_deployment:
         # Parse actual deployment info from the text
-        has_rollback = 'rolled_back' in deployment_data.lower()
-        has_failed = 'failed' in deployment_data.lower()
-        has_config = 'config:' in deployment_data.lower() or 'changed from' in deployment_data.lower()
+        has_rollback = 'rolled_back' in deployment_lower or 'rollback' in deployment_lower
+        has_failed = 'failed' in deployment_lower
+        has_config = 'config:' in deployment_lower or 'changed from' in deployment_lower or 'config change' in deployment_lower
         
-        # Extract version numbers if present
+        # Look for actual version numbers or deployment IDs as proof of real deployment
         import re
         versions = re.findall(r'v[\d.]+', deployment_data)
-        version_str = versions[0] if versions else 'recent version'
+        deploy_count_match = re.search(r'Found (\d+) deployment', deployment_data)
+        config_count_match = re.search(r'(\d+) config change', deployment_data)
+        deploy_count = int(deploy_count_match.group(1)) if deploy_count_match else 0
+        config_count = int(config_count_match.group(1)) if config_count_match else 0
+        
+        has_actual_deployment = bool(versions) or deploy_count > 0
+        version_str = versions[0] if versions else 'recent'
         
         if has_rollback or has_failed:
             recommendations.append({
                 'category': 'rollback',
-                'description': f'A deployment was rolled back or failed recently. Verify the current running version and consider rollback to the last stable version ({version_str} or earlier).',
-                'reasoning': f'Deployment history shows: {deployment_data[:150]}',
+                'description': f'Deploy: Failed/rolled back deployment detected. Verify current version.',
+                'reasoning': f'Deployment history shows issues with {version_str}.',
                 'source': 'AGENT:deployment_correlation',
                 'effectiveness': 4,
                 'risk': 'medium',
                 'estimated_ttr_minutes': 15,
                 'confidence': 85
             })
-        elif has_config:
+        elif has_actual_deployment:
+            recommendations.append({
+                'category': 'rollback',
+                'description': f'Deploy: {deploy_count} deployments, {config_count} config changes in 24h. Consider rollback if correlated.',
+                'reasoning': f'Recent deployment: {version_str}. Check timing correlation.',
+                'source': 'AGENT:deployment_correlation',
+                'effectiveness': 4,
+                'risk': 'medium',
+                'estimated_ttr_minutes': 15,
+                'confidence': 70
+            })
+        if has_config:
             recommendations.append({
                 'category': 'configuration_change',
-                'description': 'Configuration changes detected. Review and consider reverting recent config changes if they correlate with incident timing.',
-                'reasoning': f'Config changes found: {deployment_data[:150]}',
+                'description': f'Deploy: {config_count} config changes detected. Review if correlated.',
+                'reasoning': f'Configuration was modified recently.',
                 'source': 'AGENT:deployment_correlation',
                 'effectiveness': 3,
                 'risk': 'low',
                 'estimated_ttr_minutes': 10,
                 'confidence': 75
             })
-        else:
-            recommendations.append({
-                'category': 'manual_intervention',
-                'description': f'Recent deployments found. Review deployment {version_str} for potential issues.',
-                'reasoning': f'Deployment data: {deployment_data[:150]}',
-                'source': 'AGENT:deployment_correlation',
-                'effectiveness': 3,
-                'risk': 'low',
-                'estimated_ttr_minutes': 20,
-                'confidence': 70
-            })
     else:
         recommendations.append({
             'category': 'manual_intervention',
-            'description': 'No recent deployments or config changes found in the tracked system.',
-            'reasoning': 'Deployment history tool returned no data.',
+            'description': 'No recent deployments or config changes found. The issue is likely not deployment-related.',
+            'reasoning': f'Deployment data: {deployment_data[:100] if deployment_data else "No data available"}',
             'source': 'AGENT:deployment_correlation',
             'effectiveness': 1,
             'risk': 'low',
             'estimated_ttr_minutes': 10,
-            'confidence': 50
+            'confidence': 60
         })
     
     # 2. LOG PATTERNS - check for actual log data
     log_data = sources.get('opensearch', '')
     if log_data and not is_no_data(log_data):
-        # Parse actual error patterns
-        has_5xx = '5xx' in log_data.lower() or '500' in log_data or '502' in log_data or '503' in log_data
-        has_latency = 'latency' in log_data.lower() or 'timeout' in log_data.lower()
-        has_threshold = 'threshold' in log_data.lower()
+        # Parse actual patterns from log data
+        log_lower = log_data.lower()
         
-        # Count occurrences
+        # Check for actual 5xx error codes - must be standalone HTTP codes, not part of timestamps
+        # Look for patterns like "HTTP 500", "status 502", "error 503" etc.
         import re
-        error_counts = re.findall(r'count[:\s]*\(?(\d+)\)?', log_data.lower())
-        max_count = max([int(c) for c in error_counts]) if error_counts else 0
+        actual_5xx_pattern = re.search(r'(http[:\s]*5\d{2}|status[:\s]*5\d{2}|error[:\s]*5\d{2}|\b5\d{2}\s*(error|response|status))', log_lower)
+        has_actual_5xx = bool(actual_5xx_pattern)
         
-        if has_5xx and max_count > 100:
+        has_error_alarm = 'errorrate-' in log_lower or 'errorrate:' in log_lower
+        has_latency = 'highlatency' in log_lower or 'latency' in log_lower
+        has_threshold = 'threshold' in log_lower and 'exceeded' in log_lower
+        has_memory = 'highmemory' in log_lower or 'memory utilization' in log_lower
+        has_disk = 'diskspace' in log_lower or 'disk utilization' in log_lower
+        has_cpu = 'highcpu' in log_lower or 'cpu utilization' in log_lower
+        
+        # Count log entries
+        log_count_match = re.search(r'Found (\d+) log', log_data)
+        log_count = int(log_count_match.group(1)) if log_count_match else 0
+        
+        # Extract specific alarm types found
+        alarm_types = []
+        if has_latency or has_threshold:
+            alarm_types.append('latency')
+        if has_error_alarm:
+            alarm_types.append('error rate')
+        if has_memory:
+            alarm_types.append('memory')
+        if has_disk:
+            alarm_types.append('disk')
+        if has_cpu:
+            alarm_types.append('CPU')
+        
+        if has_actual_5xx:
             recommendations.append({
                 'category': 'scaling',
-                'description': f'High 5xx error rate detected ({max_count} errors). Scale horizontally or investigate backend capacity.',
-                'reasoning': f'Log analysis shows: {log_data[:150]}',
+                'description': f'Logs: HTTP 5xx errors found ({log_count} entries). Check backend health.',
+                'reasoning': f'Actual HTTP 5xx error codes detected in logs.',
                 'source': 'AGENT:log_patterns',
                 'effectiveness': 4,
                 'risk': 'low',
                 'estimated_ttr_minutes': 15,
                 'confidence': 85
             })
-        elif has_latency:
+        
+        if has_latency or has_threshold:
+            recommendations.append({
+                'category': 'scaling',
+                'description': f'Logs: Latency threshold exceeded ({log_count} entries). Consider scaling.',
+                'reasoning': f'P99 latency alarms triggered in logs.',
+                'source': 'AGENT:log_patterns',
+                'effectiveness': 4,
+                'risk': 'low',
+                'estimated_ttr_minutes': 20,
+                'confidence': 80
+            })
+        
+        if has_error_alarm and not has_actual_5xx:
             recommendations.append({
                 'category': 'manual_intervention',
-                'description': 'Latency/timeout patterns detected in logs. Check downstream dependencies and database connections.',
-                'reasoning': f'Log patterns: {log_data[:150]}',
+                'description': f'Logs: Error rate alarm triggered. Investigate error patterns.',
+                'reasoning': f'ErrorRate alarm found. Check application logs for details.',
                 'source': 'AGENT:log_patterns',
                 'effectiveness': 3,
                 'risk': 'low',
-                'estimated_ttr_minutes': 30,
-                'confidence': 75
+                'estimated_ttr_minutes': 20,
+                'confidence': 70
             })
-        else:
+        
+        if has_memory or has_disk or has_cpu:
+            resource_types = ', '.join([t for t in ['memory' if has_memory else None, 'disk' if has_disk else None, 'CPU' if has_cpu else None] if t])
+            recommendations.append({
+                'category': 'scaling',
+                'description': f'Logs: Resource alerts ({resource_types}). Scale or optimize.',
+                'reasoning': f'Resource utilization alarms detected.',
+                'source': 'AGENT:log_patterns',
+                'effectiveness': 4,
+                'risk': 'low',
+                'estimated_ttr_minutes': 15,
+                'confidence': 80
+            })
+        
+        if not alarm_types and not has_actual_5xx:
             recommendations.append({
                 'category': 'manual_intervention',
-                'description': 'Error patterns found in logs. Review the specific alarm triggers for root cause.',
-                'reasoning': f'Log data: {log_data[:150]}',
+                'description': f'Logs: {log_count} entries found. Review for patterns.',
+                'reasoning': f'Log data available for analysis.',
                 'source': 'AGENT:log_patterns',
                 'effectiveness': 3,
                 'risk': 'low',
@@ -196,15 +340,30 @@ def generate_ai_recommendations(sources, root_causes, service, alarm_name):
         # Extract runbook title and steps
         import re
         title_match = re.search(r'Runbook:\s*([^\n]+)', runbook_data)
-        title = title_match.group(1) if title_match else 'Available runbook'
+        raw_title = title_match.group(1).strip() if title_match else 'Available runbook'
         
-        steps = re.findall(r'\d+\.\s*([^\n]+)', runbook_data)
-        first_step = steps[0] if steps else 'Follow documented procedures'
+        # Clean title - remove "Category:" and everything after
+        if 'Category:' in raw_title:
+            title = raw_title.split('Category:')[0].strip()
+        else:
+            title = raw_title[:40]
+        
+        # Extract category and TTR separately
+        category_match = re.search(r'Category:\s*(\w+)', runbook_data)
+        ttr_match = re.search(r'TTR:\s*([^\n,]+)', runbook_data)
+        category = category_match.group(1) if category_match else 'general'
+        ttr = ttr_match.group(1).strip() if ttr_match else '15-30 minutes'
+        
+        # Match numbered steps - works for both multi-line and single-line formats
+        # Pattern: digit followed by period, then text until next digit+period or end
+        steps = re.findall(r'(\d+)\.\s*([^0-9]+?)(?=\s*\d+\.|$)', runbook_data)
+        num_steps = len(steps)
+        first_step = steps[0][1].strip()[:60] if steps else 'Follow documented procedures'
         
         recommendations.append({
             'category': 'manual_intervention',
-            'description': f'Runbook available: "{title}". First step: {first_step}',
-            'reasoning': f'Runbook found with {len(steps)} steps: {runbook_data[:150]}',
+            'description': f'Runbook available: "{title}" with {num_steps} steps. Start: {first_step}',
+            'reasoning': f'{num_steps} steps available. Category: {category}. TTR: {ttr}',
             'source': 'AGENT:runbook',
             'effectiveness': 4,
             'risk': 'low',
@@ -230,14 +389,19 @@ def generate_ai_recommendations(sources, root_causes, service, alarm_name):
         import re
         incident_ids = re.findall(r'INC-[A-Z0-9]+', incident_data)
         statuses = re.findall(r'Status:\s*(\w+)', incident_data)
+        root_cause_match = re.search(r'Root cause:\s*([^,\n]+)', incident_data)
+        past_root_cause = root_cause_match.group(1)[:50] if root_cause_match else None
         
         resolved_count = sum(1 for s in statuses if s.lower() == 'resolved')
         
         if incident_ids:
+            desc = f'Similar incident: {incident_ids[0]}'
+            if past_root_cause:
+                desc += f' (cause: {past_root_cause})'
             recommendations.append({
                 'category': 'manual_intervention',
-                'description': f'Similar past incidents found: {", ".join(incident_ids[:3])}. Review their resolutions for guidance.',
-                'reasoning': f'Incident history: {incident_data[:150]}',
+                'description': desc,
+                'reasoning': f'Found {len(incident_ids)} past incidents. {resolved_count} resolved.',
                 'source': 'AGENT:past_incidents',
                 'effectiveness': 4,
                 'risk': 'low',
@@ -274,26 +438,52 @@ def generate_ai_recommendations(sources, root_causes, service, alarm_name):
         has_errors = 'error' in xray_data.lower() or 'fault' in xray_data.lower()
         has_slow = 'slow' in xray_data.lower() or 'latency' in xray_data.lower() or 'duration' in xray_data.lower()
         
+        # Extract service name from xray data if available
+        service_match = re.search(r'Service:\s*(\S+)', xray_data)
+        xray_service = service_match.group(1) if service_match else service
+        if not xray_service or xray_service == 'unknown':
+            xray_service = service if service else 'this service'
+        
+        # Extract metrics
+        error_match = re.search(r'Errors?:\s*(\d+)', xray_data)
+        fault_match = re.search(r'Faults?:\s*(\d+)', xray_data)
+        requests_match = re.search(r'Total Requests?:\s*(\d+)', xray_data)
+        errors = int(error_match.group(1)) if error_match else 0
+        faults = int(fault_match.group(1)) if fault_match else 0
+        requests = int(requests_match.group(1)) if requests_match else 0
+        
         # Extract response times if present
         response_times = re.findall(r'(\d+)\s*ms', xray_data)
         max_latency = max([int(t) for t in response_times]) if response_times else 0
         
-        if has_errors:
+        if requests == 0:
+            # No traces found - this is NOT "healthy", it means no data
             recommendations.append({
                 'category': 'manual_intervention',
-                'description': f'X-Ray traces show error patterns. Investigate the failing requests and downstream dependencies.',
-                'reasoning': f'X-Ray trace analysis: {xray_data[:150]}',
+                'description': f'X-Ray: No traces found. Enable X-Ray tracing for {xray_service}.',
+                'reasoning': f'0 requests traced in the last hour. X-Ray may not be enabled.',
+                'source': 'AGENT:xray_traces',
+                'effectiveness': 2,
+                'risk': 'low',
+                'estimated_ttr_minutes': 15,
+                'confidence': 60
+            })
+        elif errors > 0 or faults > 0:
+            recommendations.append({
+                'category': 'manual_intervention',
+                'description': f'X-Ray: {errors} errors, {faults} faults in {requests} requests. Investigate traces.',
+                'reasoning': f'Error rate: {(errors+faults)/requests*100:.1f}%. Check failing requests.',
                 'source': 'AGENT:xray_traces',
                 'effectiveness': 4,
                 'risk': 'low',
                 'estimated_ttr_minutes': 30,
                 'confidence': 80
             })
-        elif has_slow and max_latency > 1000:
+        elif max_latency > 1000:
             recommendations.append({
                 'category': 'scaling',
-                'description': f'X-Ray traces show high latency ({max_latency}ms). Consider scaling or optimizing slow endpoints.',
-                'reasoning': f'X-Ray latency data: {xray_data[:150]}',
+                'description': f'X-Ray: High latency ({max_latency}ms) in {requests} requests. Scale or optimize.',
+                'reasoning': f'P99 latency exceeds 1000ms threshold.',
                 'source': 'AGENT:xray_traces',
                 'effectiveness': 4,
                 'risk': 'low',
@@ -303,12 +493,12 @@ def generate_ai_recommendations(sources, root_causes, service, alarm_name):
         else:
             recommendations.append({
                 'category': 'manual_intervention',
-                'description': 'X-Ray trace data available. Review service graph and trace details for performance insights.',
-                'reasoning': f'X-Ray data: {xray_data[:150]}',
+                'description': f'X-Ray: {requests} requests, {errors} errors, {max_latency}ms latency. Looks healthy.',
+                'reasoning': f'Traces show normal operation.',
                 'source': 'AGENT:xray_traces',
-                'effectiveness': 3,
+                'effectiveness': 2,
                 'risk': 'low',
-                'estimated_ttr_minutes': 30,
+                'estimated_ttr_minutes': 10,
                 'confidence': 70
             })
     else:
@@ -332,8 +522,8 @@ def generate_ai_recommendations(sources, root_causes, service, alarm_name):
         if has_non_compliant:
             recommendations.append({
                 'category': 'configuration_change',
-                'description': 'AWS Config shows non-compliant resources. Review and remediate compliance violations.',
-                'reasoning': f'Config compliance data: {config_data[:150]}',
+                'description': 'Config: Non-compliant resources found. Review compliance.',
+                'reasoning': f'AWS Config detected compliance violations.',
                 'source': 'AGENT:config_drift',
                 'effectiveness': 4,
                 'risk': 'medium',
@@ -343,8 +533,8 @@ def generate_ai_recommendations(sources, root_causes, service, alarm_name):
         elif has_drift:
             recommendations.append({
                 'category': 'configuration_change',
-                'description': 'Configuration drift detected. Review recent changes and verify they are intentional.',
-                'reasoning': f'Config drift data: {config_data[:150]}',
+                'description': 'Config: Configuration drift detected. Verify changes.',
+                'reasoning': f'Recent configuration changes may affect service.',
                 'source': 'AGENT:config_drift',
                 'effectiveness': 3,
                 'risk': 'low',
@@ -354,12 +544,12 @@ def generate_ai_recommendations(sources, root_causes, service, alarm_name):
         else:
             recommendations.append({
                 'category': 'manual_intervention',
-                'description': 'AWS Config data available. Review configuration state for potential issues.',
-                'reasoning': f'Config data: {config_data[:150]}',
+                'description': 'Config: Service configuration reviewed. No issues found.',
+                'reasoning': f'Configuration state is normal.',
                 'source': 'AGENT:config_drift',
                 'effectiveness': 2,
                 'risk': 'low',
-                'estimated_ttr_minutes': 30,
+                'estimated_ttr_minutes': 10,
                 'confidence': 65
             })
     else:
@@ -373,6 +563,27 @@ def generate_ai_recommendations(sources, root_causes, service, alarm_name):
             'estimated_ttr_minutes': 30,
             'confidence': 50
         })
+    
+    # Sort recommendations: prioritize actionable ones (higher effectiveness, confidence)
+    # "No data found" recommendations should NOT be top picks
+    def sort_key(rec):
+        # Penalize "no data" or "not found" recommendations
+        desc_lower = rec.get('description', '').lower()
+        is_no_data = any(phrase in desc_lower for phrase in [
+            'no recent deployment', 'no data found', 'not found', 
+            'no log patterns', 'no runbook', 'no similar past', 
+            'no x-ray', 'no aws config', 'enable config', 'enable x-ray',
+            'issue is likely not'
+        ])
+        
+        # Score: effectiveness * confidence, but penalize no-data recommendations heavily
+        base_score = rec.get('effectiveness', 1) * rec.get('confidence', 50)
+        if is_no_data:
+            base_score = base_score * 0.1  # Heavy penalty
+        
+        return -base_score  # Negative for descending sort
+    
+    recommendations.sort(key=sort_key)
     
     return recommendations
 
@@ -734,16 +945,21 @@ def is_no_data(content):
         'no past incidents',
         'no runbook found',
         'no deployment found',
+        'no recent deployment',
+        'no deployments',
+        'no config changes',
+        'no configuration changes',
         'no information available',
         'could not find',
         'unable to find',
         'no results',
-        'no matching'
+        'no matching',
+        'not found'
     ]
     
     # Check if content is primarily a "no data" message
     for pattern in no_data_patterns:
-        if lower.startswith(pattern) or pattern in lower[:50]:
+        if lower.startswith(pattern) or pattern in lower[:100]:
             return True
     
     return False

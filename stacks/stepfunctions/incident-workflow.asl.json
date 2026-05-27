@@ -134,13 +134,24 @@
       "Retry": [{"ErrorEquals": ["States.TaskFailed", "States.Timeout"], "IntervalSeconds": 5, "MaxAttempts": 2}],
       "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "HandleRemediationFailure", "ResultPath": "$.error"}],
       "ResultPath": "$.remediation_result",
-      "Next": "CheckAutoRemediation"
+      "Next": "GenerateSummary"
     },
 
     "HandleRemediationFailure": {
       "Type": "Pass",
       "Result": {"step": "remediation_recommendation", "status": "failed", "recommendations": []},
       "ResultPath": "$.remediation_result",
+      "Next": "GenerateSummary"
+    },
+
+    "GenerateSummary": {
+      "Type": "Task",
+      "Comment": "Generate AI-powered summary with best remediation suggestion and quick actions",
+      "Resource": "${SummaryLambdaArn}",
+      "TimeoutSeconds": 90,
+      "Retry": [{"ErrorEquals": ["States.TaskFailed", "States.Timeout"], "IntervalSeconds": 5, "MaxAttempts": 2}],
+      "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "CheckAutoRemediation", "ResultPath": "$.summary_error"}],
+      "ResultPath": "$.summary_result",
       "Next": "CheckAutoRemediation"
     },
 

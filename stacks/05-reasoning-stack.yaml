@@ -133,7 +133,6 @@ Resources:
 
           bedrock = boto3.client('bedrock-runtime')
           dynamodb = boto3.resource('dynamodb')
-
           MODEL_ID = os.environ['MODEL_ID']
 
           def lambda_handler(event, context):
@@ -142,11 +141,7 @@ Resources:
               prompt = build_rca_prompt(incident_context)
               response = invoke_bedrock(prompt)
               root_causes = parse_root_causes(response)
-              for cause in root_causes:
-                  if cause.get('confidence', 0) > 80:
-                      cause['runbooks'] = []
 
-              # Store root cause in DynamoDB
               if incident_id and root_causes:
                   store_root_cause(incident_id, root_causes)
 
@@ -159,12 +154,13 @@ Resources:
           def store_root_cause(incident_id, root_causes):
               table = dynamodb.Table(os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev'))
               top = root_causes[0] if root_causes else {}
+              description = extract_clean_description(top)
               try:
                   table.update_item(
                       Key={'incident_id': incident_id},
-                      UpdateExpression='SET root_cause = :rc, confidence = :c, recommendations_raw = :recs, workflow_step = :ws',
+                      UpdateExpression='SET root_cause = :rc, confidence = :c, root_causes_raw = :recs, workflow_step = :ws',
                       ExpressionAttributeValues={
-                          ':rc': top.get('description', 'Unknown'),
+                          ':rc': description,
                           ':c': int(top.get('confidence', 50)),
                           ':recs': json.dumps(root_causes, default=str),
                           ':ws': 'root_cause_analysis'
@@ -173,11 +169,48 @@ Resources:
               except Exception as e:
                   print(f"Store RCA failed: {e}")
 
+          def extract_clean_description(item):
+              """Always return a clean plain-text description, never JSON."""
+              desc = item.get('description', 'Unknown')
+              if not isinstance(desc, str):
+                  desc = str(desc)
+              stripped = desc.strip()
+              if stripped.startswith('[') or stripped.startswith('{'):
+                  try:
+                      parsed = json.loads(stripped)
+                      if isinstance(parsed, list) and parsed:
+                          if isinstance(parsed[0], dict):
+                              return parsed[0].get('description', str(parsed[0])[:150])
+                          return str(parsed[0])[:150]
+                      if isinstance(parsed, dict):
+                          return parsed.get('description', str(parsed)[:150])
+                  except:
+                      pass
+                  for char in ['.', ',', '\\n']:
+                      if char in stripped[10:]:
+                          idx = stripped.index(char, 10)
+                          return stripped[:idx+1] if char == '.' else stripped[:idx]
+                  return stripped[:150]
+              return desc
+
           def build_rca_prompt(context):
-              return f"""Analyze this incident and identify probable root causes. Return ONLY a JSON array.
-              Each item must have: "description" (string), "confidence" (integer 0-100), "evidence" (string).
-              Context: {json.dumps(context, default=str)[:2000]}
-              Return JSON array only, no other text."""
+              return f"""Analyze this incident and identify the top 3 probable root causes.
+
+          IMPORTANT FORMAT RULES:
+          - Return ONLY a valid JSON array
+          - Each "description" MUST be a single plain-text sentence (e.g., "Database connection pool exhaustion due to increased load")
+          - Do NOT put JSON inside the description field
+          - Keep descriptions under 100 characters
+
+          Return format:
+          [
+            {{"description": "short plain text sentence", "confidence": 80, "evidence": "what data supports this"}},
+            {{"description": "another plain text sentence", "confidence": 60, "evidence": "supporting data"}}
+          ]
+
+          Incident context: {json.dumps(context, default=str)[:2000]}
+
+          Return the JSON array only, no other text."""
 
           def invoke_bedrock(prompt):
               response = bedrock.invoke_model(
@@ -194,15 +227,58 @@ Resources:
           def parse_root_causes(response_text):
               try:
                   text = response_text.strip()
+                  if '```json' in text:
+                      text = text.split('```json')[1].split('```')[0].strip()
+                  elif '```' in text:
+                      text = text.split('```')[1].split('```')[0].strip()
+                  
                   if text.startswith('['):
-                      return json.loads(text)
-                  start = text.find('[')
-                  end = text.rfind(']') + 1
-                  if start >= 0 and end > start:
-                      return json.loads(text[start:end])
-                  return [{'description': text, 'confidence': 50, 'evidence': 'Bedrock response'}]
-              except Exception:
-                  return [{'description': response_text[:200], 'confidence': 50, 'evidence': 'Parse error'}]
+                      causes = json.loads(text)
+                  else:
+                      start = text.find('[')
+                      end = text.rfind(']') + 1
+                      if start >= 0 and end > start:
+                          causes = json.loads(text[start:end])
+                      else:
+                          return [{'description': text[:100], 'confidence': 50, 'evidence': 'Could not parse structured response'}]
+                  
+                  cleaned = []
+                  for cause in causes[:3]:
+                      if isinstance(cause, dict):
+                          desc = cause.get('description', '')
+                          if isinstance(desc, str) and desc.strip().startswith('['):
+                              try:
+                                  inner = json.loads(desc.strip())
+                                  if isinstance(inner, list) and inner and isinstance(inner[0], dict):
+                                      for inner_cause in inner[:3]:
+                                          inner_desc = inner_cause.get('description', '')
+                                          if isinstance(inner_desc, str) and not inner_desc.strip().startswith('['):
+                                              cleaned.append({
+                                                  'description': inner_desc,
+                                                  'confidence': inner_cause.get('confidence', 50),
+                                                  'evidence': inner_cause.get('evidence', '')
+                                              })
+                                      break
+                              except:
+                                  pass
+                              continue
+                          if isinstance(desc, str) and not desc.strip().startswith('{') and 'Parse error' not in desc:
+                              cleaned.append(cause)
+                          else:
+                              plain = extract_clean_description(cause)
+                              if plain and 'Parse error' not in plain:
+                                  cleaned.append({
+                                      'description': plain,
+                                      'confidence': cause.get('confidence', 50),
+                                      'evidence': cause.get('evidence', '')
+                                  })
+                  return cleaned if cleaned else [{'description': response_text[:100], 'confidence': 50, 'evidence': 'Parse fallback'}]
+              except Exception as e:
+                  print(f"Parse error: {e}")
+                  text = response_text.strip()[:200]
+                  if '.' in text[10:]:
+                      text = text[:text.index('.', 10)+1]
+                  return [{'description': text[:100], 'confidence': 50, 'evidence': f'Parse error: {str(e)[:50]}'}]
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Remediation Recommendation Lambda
@@ -320,7 +396,34 @@ Resources:
               incident_id = incident_context.get('signal_id', incident_context.get('signal', {}).get('signal_id', ''))
               service = incident_context.get('service', 'unknown')
 
-              prompt = f"""You are a senior SRE consultant with 15+ years of experience in cloud operations, incident management, and business continuity. You are evaluating an incident on service "{service}". Based ONLY on the factual evidence provided below, assess the business impact. RULES: Base estimates on alarm type, service role, and blast radius. Customer-facing services (payments, auth, gateway, API) = higher impact. Internal/backend (logger, scheduler, config) = lower impact. For revenue, reason about service category. For affected users, reason about critical path. Provide a reasoning field explaining your logic. Do NOT invent numbers without justification. Return ONLY a JSON object with: severity_score (1-5), business_impact_score (1-10), affected_users (integer, 0 if internal), revenue_at_risk (string with basis), sla_status (OK/Warning/At Risk/Breached), service_risk_score (0-100), reasoning (1-2 sentences explaining your assessment). Context: {json.dumps(incident_context, default=str)[:1500]}. Return JSON only."""
+              prompt = f"""You are a senior SRE at an e-commerce company doing $500M annual revenue ($57,000/hour average).
+          Assess the business impact of this incident on service "{service}".
+
+          THINK STEP BY STEP:
+          1. What does this service do? (payment processing? internal logging? user-facing search?)
+          2. How many users interact with it per hour? (payments = millions, internal tools = 0)
+          3. What percentage of revenue flows through it? (payments = 60%, search = 5%, logging = 0%)
+          4. What's the blast radius? (gateway down = everything down, logger down = no customer impact)
+
+          EXAMPLES OF CORRECT SCORING:
+          - payments-api with HighLatency: impact=9, users=1200000, revenue="$34,200/hour (60% of hourly revenue)", sla="Breached"
+          - orders-service with High5xxRate: impact=8, users=800000, revenue="$22,800/hour (40% of orders affected)", sla="At Risk"
+          - search-service with HighLatency: impact=6, users=200000, revenue="$2,850/hour (5% revenue from search)", sla="Warning"
+          - notifications-svc with QueueDepth: impact=4, users=50000, revenue="$570/hour (delayed notifications)", sla="Warning"
+          - audit-logger with DiskUsage: impact=2, users=0, revenue="$0 (internal only)", sla="OK"
+          - cache-manager with HighCPU: impact=2, users=0, revenue="$0 (infrastructure)", sla="OK"
+          - queue-processor with MemoryPressure: impact=1, users=0, revenue="$0 (background processing)", sla="OK"
+
+          RULES:
+          - revenue_at_risk MUST be a specific dollar amount with explanation (e.g., "$12,500/hour (based on 22% of transaction volume)")
+          - affected_users MUST be 0 for internal/infrastructure services
+          - sla_status: "Breached" only for impact 9-10, "At Risk" for 7-8, "Warning" for 4-6, "OK" for 1-3
+          - DO NOT use generic values like "$X/hour" or "Significant" — always calculate a specific number
+
+          Context: {json.dumps(incident_context, default=str)[:1200]}
+
+          Return ONLY a JSON object:
+          {{"severity_score": int, "business_impact_score": int, "affected_users": int, "revenue_at_risk": "string with dollar amount and explanation", "sla_status": "string", "service_risk_score": int, "reasoning": "string"}}"""
 
               try:
                   response = bedrock.invoke_model(
@@ -340,7 +443,7 @@ Resources:
                       'severity_score': int(result.get('severity_score', 3)),
                       'business_impact_score': int(result.get('business_impact_score', 5)),
                       'affected_users': int(result.get('affected_users', 0)),
-                      'revenue_at_risk': result.get('revenue_at_risk', 'Unknown'),
+                      'revenue_at_risk': str(result.get('revenue_at_risk', 'Unknown')),
                       'sla_status': result.get('sla_status', 'Unknown'),
                       'service_risk_score': int(result.get('service_risk_score', 50)),
                       'scoring_reasoning': result.get('reasoning', '')
@@ -349,7 +452,6 @@ Resources:
                   print(f"Scoring error: {e}")
                   scores = {'severity_score': 3, 'business_impact_score': 5, 'affected_users': 0, 'revenue_at_risk': 'Unknown', 'sla_status': 'Unknown', 'service_risk_score': 50, 'scoring_reasoning': ''}
 
-              # Store scores in incidents table
               if incident_id:
                   store_scores(incident_id, scores)
 
@@ -413,36 +515,96 @@ Resources:
           MODEL_ID = os.environ['MODEL_ID']
 
           def lambda_handler(event, context):
-              # Extract from nested Step Functions state
+              # Extract from Step Functions state — all previous steps are available
               signal = event.get('signal', {})
               incident_id = event.get('incident_id') or signal.get('signal_id', '')
               service = event.get('service') or signal.get('service', 'unknown')
-              incident_context = event.get('step1', {}).get('incident_context', {})
 
-              # Generate postmortem via Bedrock
-              prompt = f"""Generate a brief incident postmortem for service "{service}". Include:
-              1. "summary" - what happened (2 sentences)
-              2. "root_cause" - likely cause
-              3. "duration" - estimated duration
-              4. "prevention" - array of 3 prevention steps
-              5. "impact" - who was affected
-              Return ONLY JSON object."""
+              # Get root cause from Step 3
+              step3 = event.get('step3', {})
+              root_causes = step3.get('root_causes', [])
+              root_cause = root_causes[0].get('description', '') if root_causes else ''
+              confidence = root_causes[0].get('confidence', 0) if root_causes else 0
+
+              # Get scoring from Step 2
+              step2 = event.get('step2', {})
+              severity = step2.get('severity_score', signal.get('severity_score', 3))
+              affected_users = step2.get('affected_users', 0)
+              revenue_at_risk = step2.get('revenue_at_risk', 'Unknown')
+              scoring_reasoning = step2.get('scoring_reasoning', '')
+
+              # Get agent investigation from Step 3b
+              step3b = event.get('step3b', {})
+              agent_investigation = step3b.get('investigation', '')
+
+              # Get recommendations from Step 4
+              step4 = event.get('step4', {})
+              recommendations = step4.get('recommendations', [])
+
+              # Build a rich prompt using ALL previous step data
+              prompt = f"""Generate a structured incident postmortem for service "{service}".
+
+          USE THE FOLLOWING FACTS FROM THE INVESTIGATION (do NOT invent different information):
+
+          ROOT CAUSE (from AI analysis, confidence {confidence}%):
+          {root_cause or 'Unknown - analysis pending'}
+
+          SEVERITY: {severity}/5
+          AFFECTED USERS: {affected_users}
+          REVENUE AT RISK: {revenue_at_risk}
+
+          SCORING REASONING:
+          {scoring_reasoning or 'Not available'}
+
+          AGENT INVESTIGATION FINDINGS:
+          {agent_investigation[:1500] or 'Agent investigation not available'}
+
+          REMEDIATION RECOMMENDATIONS:
+          {json.dumps(recommendations[:3], default=str)[:1000] if recommendations else 'None available'}
+
+          ALARM DETAILS:
+          {signal.get('source_event_summary', json.dumps(signal, default=str)[:500])}
+
+          RULES:
+          - The "root_cause" field MUST match the root cause above — do NOT invent a different one.
+          - The "summary" should describe what happened using the facts above.
+          - The "prevention" steps should be specific to this root cause, not generic.
+          - The "impact" should use the affected_users and revenue_at_risk numbers above.
+          - The "duration" should be estimated based on severity.
+
+          Return ONLY a JSON object with:
+          1. "summary" - what happened (2-3 sentences using the facts above)
+          2. "root_cause" - MUST be: "{root_cause or 'Under investigation'}"
+          3. "duration" - estimated duration based on severity
+          4. "prevention" - array of 3 specific prevention steps for THIS root cause
+          5. "impact" - who was affected (use the numbers above)
+
+          Return JSON only."""
 
               try:
                   text = invoke_bedrock(prompt)
                   start = text.find('{')
                   end = text.rfind('}') + 1
-                  postmortem_data = json.loads(text[start:end]) if start >= 0 else {'summary': text[:200]}
+                  postmortem_data = json.loads(text[start:end]) if start >= 0 else {}
+                  # Force root cause to match Step 3
+                  if root_cause:
+                      postmortem_data['root_cause'] = root_cause
               except Exception as e:
                   print(f"Postmortem generation failed: {e}")
-                  postmortem_data = {'summary': f'Incident on {service}', 'root_cause': 'Analysis pending', 'prevention': ['Review pending']}
+                  postmortem_data = {
+                      'summary': f'Incident on {service}: {root_cause or "Under investigation"}',
+                      'root_cause': root_cause or 'Analysis pending',
+                      'prevention': ['Review and address root cause', 'Add monitoring for early detection', 'Update runbooks'],
+                      'duration': 'Under investigation',
+                      'impact': f'{affected_users} users affected. Revenue at risk: {revenue_at_risk}'
+                  }
 
               # Store in postmortems table
-              store_postmortem(incident_id, service, postmortem_data)
+              store_postmortem(incident_id, service, postmortem_data, scoring_reasoning)
 
               return {'statusCode': 200, 'postmortem': postmortem_data}
 
-          def store_postmortem(incident_id, service, data):
+          def store_postmortem(incident_id, service, data, scoring_reasoning=''):
               if not incident_id:
                   return
               table = dynamodb.Table(os.environ['POSTMORTEMS_TABLE'])
@@ -457,6 +619,7 @@ Resources:
                       'duration': data.get('duration', 'Unknown'),
                       'prevention': json.dumps(data.get('prevention', [])),
                       'impact_summary': data.get('impact', ''),
+                      'scoring_reasoning': scoring_reasoning,
                       'created_at': datetime.now(timezone.utc).isoformat(),
                       'status': 'GENERATED'
                   })
@@ -479,22 +642,93 @@ Resources:
                   modelId=MODEL_ID,
                   body=json.dumps({
                       'anthropic_version': 'bedrock-2023-05-31',
-                      'max_tokens': 8192,
+                      'max_tokens': 2048,
                       'messages': [{'role': 'user', 'content': prompt}]
                   })
               )
               body = json.loads(response['body'].read())
               return body['content'][0]['text']
 
-          def store_postmortem(incident_id, summary, postmortem):
-              table = dynamodb.Table(os.environ['POSTMORTEMS_TABLE'])
-              table.put_item(Item={
-                  'postmortem_id': str(uuid.uuid4()),
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Remediation Summary Lambda
+  # Code managed via: scripts/lambdas/create-summary-lambda.py
+  # Features: AI-powered summary, best recommendation selection, quick actions
+  # ─────────────────────────────────────────────────────────────────────────────
+  SummaryLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub outageshield-remediation-summary-${Environment}
+      Runtime: python3.12
+      Handler: index.lambda_handler
+      Role: !GetAtt RemediationLambdaRole.Arn
+      Timeout: 90
+      MemorySize: 256
+      TracingConfig:
+        Mode: Active
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          MODEL_ID: !Ref BedrockModelId
+          INCIDENTS_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-IncidentsTableName
+          AI_REASONING_TABLE: !Sub outageshield-ai-reasoning-${Environment}
+      Code:
+        ZipFile: |
+          # Remediation Summary Lambda - AI-powered summary generation
+          # See scripts/lambdas/create-summary-lambda.py for full implementation
+          # This is a placeholder - deploy full code via the script
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+
+          bedrock = boto3.client('bedrock-runtime')
+          dynamodb = boto3.resource('dynamodb')
+          MODEL_ID = os.environ.get('MODEL_ID', 'anthropic.claude-3-haiku-20240307-v1:0')
+          INCIDENTS_TABLE = os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev')
+
+          def lambda_handler(event, context):
+              signal = event.get('signal', {})
+              incident_id = signal.get('signal_id', '')
+              service = signal.get('service', 'unknown')
+              step4 = event.get('step4', {})
+              recommendations = step4.get('recommendations', [])
+              
+              # Find best recommendation
+              best = recommendations[0] if recommendations else {'category': 'manual_intervention', 'description': 'Manual investigation required'}
+              
+              summary = {
                   'incident_id': incident_id,
-                  'summary': summary,
-                  'postmortem': postmortem,
-                  'created_at': datetime.now(timezone.utc).isoformat()
-              })
+                  'service': service,
+                  'generated_at': datetime.utcnow().isoformat() + 'Z',
+                  'total_recommendations': len(recommendations),
+                  'recommended_action': {
+                      'type': best.get('category', 'manual_intervention'),
+                      'description': best.get('description', ''),
+                      'confidence': best.get('confidence', 50),
+                      'risk': best.get('risk', 'medium')
+                  },
+                  'ai_summary': f"Incident on {service} requires {best.get('category', 'investigation')}. {best.get('description', '')}"
+              }
+              
+              # Store summary
+              try:
+                  table = dynamodb.Table(INCIDENTS_TABLE)
+                  table.update_item(
+                      Key={'incident_id': incident_id},
+                      UpdateExpression='SET remediation_summary = :summary',
+                      ExpressionAttributeValues={':summary': json.dumps(summary)}
+                  )
+              except Exception as e:
+                  print(f'Store summary failed: {e}')
+              
+              return {'statusCode': 200, 'summary': summary}
+
+  SummaryLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/outageshield-remediation-summary-${Environment}
+      RetentionInDays: !Ref RetentionDays
 
   # ─────────────────────────────────────────────────────────────────────────────
   # CloudWatch Log Groups
@@ -547,3 +781,9 @@ Outputs:
     Value: !GetAtt PostmortemLambda.Arn
     Export:
       Name: !Sub outageshield-reasoning-${Environment}-PostmortemLambdaArn
+
+  SummaryLambdaArn:
+    Description: Remediation Summary Lambda ARN
+    Value: !GetAtt SummaryLambda.Arn
+    Export:
+      Name: !Sub outageshield-reasoning-${Environment}-SummaryLambdaArn

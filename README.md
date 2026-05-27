@@ -6,6 +6,7 @@
 [![Bedrock](https://img.shields.io/badge/Amazon-Bedrock-blue)](https://aws.amazon.com/bedrock/)
 [![React](https://img.shields.io/badge/React-18.3-61dafb)](https://reactjs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
+[![Last Updated](https://img.shields.io/badge/Updated-May%202026-green)]()
 
 ---
 
@@ -16,16 +17,71 @@ OutageShield AI is an enterprise-grade incident management platform that leverag
 ### Key Features
 
 - **🔍 Early Outage Detection** - Detects anomalies in CloudWatch metrics, logs, and X-Ray traces before full service degradation
-- **🤖 AI-Powered Root Cause Analysis** - Amazon Bedrock agent autonomously investigates incidents using 6 specialized tools
+- **🤖 AI-Powered Root Cause Analysis** - Amazon Bedrock agent autonomously investigates incidents using 6 specialized tools with categorized root causes
+- **🏷️ RCA Categorization** - Automatic classification of root causes into 5 categories: capacity, performance, configuration, deployment, dependency
 - **📊 Intelligent Correlation** - Links alerts with deployments, config changes, and historical incidents
-- **💡 Smart Remediation** - Generates ranked remediation recommendations with runbook integration
+- **💡 Smart Remediation** - Generates 9 ranked recommendations with anti-hallucination rules - all recommendations are data-driven from actual investigation findings
+- **📋 AI Summary Generation** - Produces actionable summaries with best remediation suggestion and quick action commands
 - **🎫 Ticketing Integration** - Automatic Jira and PagerDuty ticket creation
-- **📱 Real-time Dashboard** - React-based incident command center with WebSocket updates
-- **📝 Auto-generated Postmortems** - AI-generated incident summaries and prevention recommendations
+- **📱 Real-time Dashboard** - React-based incident command center with WebSocket updates and color-coded RCA category badges
+- **📝 Auto-generated Postmortems** - AI-generated incident summaries with timeline, impact analysis, and lessons learned
+- **🛡️ AI Prevention Recommendations** - LLM-generated long-term prevention steps based on RCA category and investigation context
+- **🚨 Escalation Alerts** - Automatic escalation for high-severity incidents (severity >= 4)
+- **✅ Human Approval Gate** - waitForTaskToken pattern for remediation approval workflow
 
 ---
 
-## Architecture
+## RCA Categories
+
+Root causes are automatically classified into 5 categories for better remediation targeting:
+
+| Category | Description | Example Causes | Prevention Focus |
+|----------|-------------|----------------|------------------|
+| **capacity** | Resource exhaustion issues | CPU/memory limits, disk full, connection pool exhausted | Auto-scaling, capacity planning, resource monitoring |
+| **performance** | Latency and throughput issues | Slow queries, high latency, timeout errors | Performance optimization, caching, query tuning |
+| **configuration** | Misconfiguration issues | Wrong settings, invalid parameters, missing config | Config validation, IaC, change management |
+| **deployment** | Deployment-related issues | Bad deploy, version mismatch, rollback needed | CI/CD improvements, canary deployments, rollback automation |
+| **dependency** | External dependency failures | Third-party API down, database unavailable | Circuit breakers, fallbacks, dependency health checks |
+
+The UI displays color-coded badges for each category:
+- 🔴 **capacity** - Red badge
+- 🟠 **performance** - Orange badge  
+- 🟡 **configuration** - Amber badge
+- 🔵 **deployment** - Sky blue badge
+- 🟣 **dependency** - Purple badge
+
+---
+
+## AI-Powered Features
+
+### Root Cause Analysis (RCA)
+The RCA Lambda uses Amazon Bedrock (Claude 3 Haiku) to analyze incident context and determine:
+- Primary root cause with confidence score (0-100%)
+- Category classification (capacity/performance/configuration/deployment/dependency)
+- Supporting evidence from logs, metrics, and traces
+
+### Remediation Recommendations
+The system generates 9 data-driven recommendations with **anti-hallucination rules**:
+- All recommendations must be based on actual tool findings
+- X-Ray showing 0 requests = "No traces found" (not "healthy")
+- Log patterns only claim errors when actual error codes are found
+- Each recommendation includes: confidence %, risk level, estimated TTR, and data source
+
+### AI Prevention Recommendations
+Postmortems include LLM-generated long-term prevention steps based on:
+- RCA category (capacity, performance, configuration, deployment, dependency)
+- Service name and alarm type
+- Investigation findings from all 6 agent tools
+- Remediation actions taken
+
+Example prevention recommendations by category:
+- **Capacity**: "Implement proactive capacity planning with 30% headroom"
+- **Performance**: "Add caching layer to reduce database load"
+- **Configuration**: "Implement configuration validation in CI/CD pipeline"
+- **Deployment**: "Enable canary deployments with automatic rollback"
+- **Dependency**: "Implement circuit breaker pattern for external APIs"
+
+---
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
@@ -51,14 +107,14 @@ OutageShield AI is an enterprise-grade incident management platform that leverag
 │                                     │                                           │
 │                          ┌──────────▼──────────┐                               │
 │                          │   Step Functions    │                               │
-│                          │   (9-Step Workflow) │                               │
+│                          │  (11-Step Workflow) │                               │
 │                          └──────────┬──────────┘                               │
 │                                     │                                           │
 │    ┌────────────────────────────────┼────────────────────────────────┐         │
 │    │                                │                                │         │
 │    ▼                                ▼                                ▼         │
 │ ┌──────────┐  ┌──────────┐  ┌──────────────┐  ┌──────────┐  ┌──────────┐      │
-│ │Correlation│  │ Scoring  │  │   Bedrock    │  │Remediation│  │  Ticket  │      │
+│ │Correlation│  │ Scoring  │  │   Bedrock    │  │Remediation│  │  Summary │      │
 │ │  Lambda   │  │  Lambda  │  │    Agent     │  │  Lambda   │  │  Lambda  │      │
 │ └──────────┘  └──────────┘  │  (6 Tools)   │  └──────────┘  └──────────┘      │
 │                             └──────────────┘                                   │
@@ -88,20 +144,147 @@ OutageShield AI is an enterprise-grade incident management platform that leverag
 
 ## Incident Investigation Workflow
 
-The Step Functions workflow executes a 9-step investigation process:
+The Step Functions workflow executes an 11-step investigation process:
 
 | Step | Lambda | Description |
 |------|--------|-------------|
-| 1 | `outageshield-correlation` | Correlate context - gather logs, metrics, deployments |
-| 2 | `outageshield-scoring` | Score severity and business impact (1-5, 1-10) |
-| 3 | `outageshield-rootcause` | AI root cause analysis via Bedrock |
-| 3b | `outageshield-agent-invoker` | Bedrock Agent deep investigation (6 tools) |
-| 4 | `outageshield-remediation-recommend` | Generate remediation recommendations |
+| 1 | `outageshield-correlation-dev` | Correlate context - gather logs, metrics, deployments |
+| 2 | `outageshield-scoring-dev` | Score severity and business impact (1-5, 1-10) |
+| 2b | `outageshield-notification-dev` | Send escalation alert if severity >= 4 |
+| 3 | `outageshield-rootcause-dev` | AI root cause analysis via Bedrock with category |
+| 3b | `outageshield-agent-invoker-dev` | Bedrock Agent deep investigation (6 tools) |
+| 4 | `outageshield-remediation-recommend-dev` | Generate 9 remediation recommendations |
+| 4b | `outageshield-remediation-summary-dev` | AI-powered summary with best action suggestion |
 | 5 | Choice | Check if auto-remediation enabled |
-| 6 | `outageshield-remediation-executor` | Execute approved remediation (SSM) |
-| 7 | `outageshield-ticket` | Create Jira + PagerDuty tickets |
-| 8 | `outageshield-notification` | Send SNS notifications |
-| 9 | `outageshield-postmortem` | Generate AI postmortem |
+| 6 | `outageshield-remediation-executor-dev` | Execute approved remediation (SSM) |
+| 7 | `outageshield-ticket-dev` | Create Jira + PagerDuty tickets |
+| 8 | `outageshield-notification-dev` | Send SNS notifications |
+| 9 | `outageshield-postmortem-dev` | Generate AI postmortem with prevention recommendations |
+
+---
+
+## Real-World Example: Database Connection Pool Exhaustion
+
+Here's a complete walkthrough of how OutageShield AI handles a real incident:
+
+### Incident: `INC-6686982D`
+- **Service**: `email-service`
+- **Alarm**: `DatabaseConnections-email-service`
+- **Trigger**: Database connection pool at 98% utilization
+
+### Step 1: Detection & Correlation
+CloudWatch alarm triggers detection. The correlation Lambda gathers context:
+- **Related Alarms**: 5 correlated alarms detected
+  - `DatabaseConnections-email-service` - Pool at 98%
+  - `QueueBacklog-email-service` - Queue depth exceeded 36,589 messages
+  - `Timeout-email-service` - Function timeout rate exceeded 100%
+- **Deployments**: No recent deployments found
+- **Config Changes**: None detected
+
+### Step 2: Severity Scoring
+AI analyzes business impact:
+```
+Severity Score: 4 (Warning)
+Business Impact: 4/10
+Affected Users: 600,000
+Revenue at Risk: $3,420/hour (0.6% of hourly revenue)
+SLA Status: Warning
+```
+
+**AI Reasoning**: "The email-service handles transactional emails for customer orders and account management. A disruption would impact order confirmations, password resets, and account notifications."
+
+### Step 3: Root Cause Analysis
+Bedrock AI identifies root causes with categories:
+
+| Root Cause | Confidence | Category |
+|------------|------------|----------|
+| Database connection pool exhaustion due to increased load | 90% | 🔴 capacity |
+| Inefficient database queries or excessive operations | 70% | 🟠 performance |
+| Misconfiguration of connection pool settings | 80% | 🟡 configuration |
+
+### Step 3b: Bedrock Agent Investigation
+The AI agent uses 6 tools to investigate:
+
+```
+[Source: Incident History DB]
+No past incidents found for email-service.
+
+[Source: OpenSearch Logs]
+Found 10 log entries:
+- DBConnExhaustion-email-service: connections (586) > pool max (100)
+- QueueBacklog-email-service: Queue depth exceeded 24,739 messages
+- Timeout-email-service: Function timeout rate exceeded 84%
+
+[Source: Runbook DB]
+Runbook: "General Troubleshooting for DatabaseConnections"
+Category: manual_intervention, TTR: 30-60 minutes
+Steps: 5 steps available
+
+[Source: Deployment History]
+No recent deployments or config changes in last 24 hours.
+
+[Source: X-Ray Traces]
+Service: email-service | Requests: 0 | Errors: 0, Faults: 0
+Note: X-Ray tracing may not be enabled.
+
+[Source: AWS Config]
+Auto-Scaling: Verify enabled [Check]
+Connection Pool: Review limits [Check]
+```
+
+### Step 4: Remediation Recommendations
+6 data-driven recommendations generated:
+
+| # | Category | Description | Confidence | TTR |
+|---|----------|-------------|------------|-----|
+| 1 | manual_intervention | Runbook: "General Troubleshooting" with 5 steps | 85% | 15m |
+| 2 | scaling | Logs: Latency threshold exceeded. Consider scaling. | 80% | 20m |
+| 3 | manual_intervention | Config: Service configuration reviewed. No issues. | 65% | 10m |
+| 4 | manual_intervention | X-Ray: No traces found. Enable X-Ray tracing. | 60% | 15m |
+| 5 | manual_intervention | No recent deployments. Issue not deployment-related. | 60% | 10m |
+| 6 | manual_intervention | No similar past incidents. New issue type. | 50% | 60m |
+
+### Step 4b: AI Summary
+```
+Recommended Action: SCALING (80% confidence, ~20m TTR)
+
+AI Summary: "The email-service experienced database connection pool exhaustion 
+due to increased load, leading to high latency and triggered threshold alarms. 
+Evidence indicates P99 latency anomalies and error spikes, with no recent 
+deployments or configuration changes. Recommended action: scale the email-service 
+to handle increased load."
+```
+
+**Quick Actions Generated**:
+- 📖 Runbook Step 1: Check CloudWatch metrics for anomalies
+- 🚀 SCALE OUT: `aws autoscaling set-desired-capacity --auto-scaling-group-name email-service-asg --desired-capacity 4`
+- 🔬 X-Ray: Get fault traces for email-service
+- 🚨 Check Alarm: QueueBacklog-email-service
+
+### Step 7: Ticket Creation
+- **Jira**: `TGSHLD-3112` - https://corpinfollc.atlassian.net/browse/TGSHLD-3112
+- **PagerDuty**: `Q0KCKCOX6887Q1` - Incident created and assigned
+
+### Step 8: Notifications
+SNS escalation sent to `sre-team@shopsphere.com`:
+```
+[OutageShield] SEV-4 | email-service | DatabaseConnections-email-service
+
+Service:         email-service
+Severity:        SEV-4
+Root Cause:      Database connection pool exhaustion due to increased load
+Revenue at Risk: $3,420/hour
+Affected Users:  600,000
+Jira Ticket:     TGSHLD-3112
+```
+
+### Step 9: Postmortem Generation
+AI generates postmortem with prevention recommendations based on RCA category (capacity):
+- Implement proactive capacity planning with 30% headroom
+- Configure auto-scaling policies for database connections
+- Add CloudWatch alarms for connection pool utilization at 70%
+- Implement connection pooling best practices
+- Schedule regular load testing
 
 ---
 
@@ -120,6 +303,114 @@ The AI agent uses 6 specialized tools for comprehensive incident investigation:
 
 ---
 
+## AI Summary Generation
+
+The Summary Lambda (`outageshield-remediation-summary`) generates actionable summaries after remediation recommendations:
+
+### Features
+- **Best Recommendation Selection** - Analyzes all recommendations and selects the most effective one
+- **AI-Powered Summary** - Uses Bedrock to generate developer-focused technical summaries
+- **Quick Action Commands** - Provides ready-to-run AWS CLI commands based on recommendation type
+- **Investigation Summary** - Extracts key metrics and findings from agent investigation
+- **Recommendation Breakdown** - Categorizes recommendations by type (scaling, rollback, config, manual)
+
+### Quick Actions by Category
+
+| Category | Example Commands |
+|----------|------------------|
+| **Scaling** | Scale ASG, check CPU/memory, view target group health |
+| **Rollback** | List deployments, rollback to previous, stop deployment |
+| **Configuration** | List/update SSM parameters, force service restart |
+| **Manual** | Tail logs, search errors, check alarms, get X-Ray traces |
+
+### Anti-Hallucination Rules
+
+The remediation system enforces strict data-driven recommendations:
+
+1. **X-Ray Traces**: If 0 requests traced → "No traces found. Enable X-Ray tracing" (never claims "healthy")
+2. **Log Analysis**: Only reports actual error patterns found (no false 5xx claims)
+3. **Deployment Check**: Reports actual deployment count and config changes from DynamoDB
+4. **Runbook Steps**: Accurately counts steps from runbook content
+5. **Past Incidents**: Reports actual count of similar incidents found
+6. **Config Drift**: Reports actual compliance status from AWS Config
+
+All 9 recommendations include:
+- Data source attribution (e.g., "[Source: OpenSearch Logs]")
+- Confidence percentage based on evidence strength
+- Risk level (low/medium/high)
+- Estimated time to resolution (TTR)
+
+---
+
+## Postmortem Generation
+
+The Postmortem Lambda (`outageshield-postmortem-dev`) automatically generates comprehensive incident reports:
+
+### Postmortem Contents
+- **Executive Summary** - AI-generated overview of the incident
+- **Timeline** - Key events from detection to resolution
+- **Impact Analysis** - Affected users, revenue impact, duration
+- **Root Cause** - Categorized root cause with confidence score
+- **Investigation Findings** - Summary of agent tool findings
+- **Remediation Actions** - Actions taken to resolve the incident
+- **Prevention Recommendations** - AI-generated long-term prevention steps (5 specific recommendations based on RCA category)
+- **Lessons Learned** - Key takeaways for future incidents
+
+### Prevention Recommendation Categories
+| RCA Category | Prevention Focus Areas |
+|--------------|----------------------|
+| **capacity** | Auto-scaling policies, capacity planning, resource monitoring, load testing |
+| **performance** | Query optimization, caching strategies, performance testing, SLO tuning |
+| **configuration** | Config validation, IaC adoption, change management, config drift detection |
+| **deployment** | CI/CD improvements, canary deployments, rollback automation, feature flags |
+| **dependency** | Circuit breakers, fallback mechanisms, dependency health checks, SLA monitoring |
+
+---
+
+## CloudFormation Stacks
+
+The infrastructure is deployed across 15 CloudFormation stacks:
+
+| Stack | File | Description |
+|-------|------|-------------|
+| 01 | `01-ingestion-stack.yaml` | EventBridge rules, Kinesis streams for data ingestion |
+| 02 | `02-storage-stack.yaml` | DynamoDB tables, OpenSearch Serverless collection |
+| 03 | `03-detection-stack.yaml` | Detection Lambda, CloudWatch alarm processing |
+| 04 | `04-correlation-stack.yaml` | Correlation Lambda, context gathering |
+| 05 | `05-reasoning-stack.yaml` | RCA, Scoring, Remediation, Postmortem Lambdas |
+| 06 | `06-orchestration-stack.yaml` | Step Functions workflow (11-step investigation) |
+| 07 | `07-notifications-stack.yaml` | SNS topics, notification Lambda, ticket creation |
+| 08 | `08-remediation-stack.yaml` | SSM remediation executor, approval workflow |
+| 09 | `09-dashboard-stack.yaml` | API Gateway REST API, dashboard Lambda |
+| 10 | `10-auth-stack.yaml` | Cognito user pool, authentication |
+| 11 | `11-websocket-stack.yaml` | WebSocket API for real-time updates |
+| 12 | `12-cloudfront-stack.yaml` | CloudFront distribution, S3 bucket for UI |
+| 13 | `13-bedrock-agent-stack.yaml` | Bedrock Agent, agent actions Lambda (6 tools) |
+| 14 | `14-cloudtrail-deployments-stack.yaml` | CloudTrail for deployment tracking |
+| 15 | `15-xray-config-stack.yaml` | X-Ray tracing, AWS Config integration |
+
+---
+
+## Lambda Functions
+
+| Lambda | Description | Key Features |
+|--------|-------------|--------------|
+| `outageshield-detection-dev` | Anomaly detection | Processes CloudWatch alarms, creates incidents, writes to OpenSearch |
+| `outageshield-correlation-dev` | Context correlation | Gathers logs, metrics, deployments from multiple sources |
+| `outageshield-scoring-dev` | Severity scoring | Calculates severity (1-5) and business impact (1-10) |
+| `outageshield-rootcause-dev` | Root cause analysis | AI-powered RCA with 5 category classifications |
+| `outageshield-agent-invoker-dev` | Bedrock agent orchestration | Invokes agent with 6 investigation tools |
+| `outageshield-agent-actions-dev` | Agent tool execution | Executes searchLogs, checkDeployments, searchTraces, etc. |
+| `outageshield-remediation-recommend-dev` | Recommendation generation | 9 data-driven recommendations with anti-hallucination rules |
+| `outageshield-remediation-summary-dev` | AI summary | Best action selection, quick commands, investigation summary |
+| `outageshield-remediation-executor-dev` | Remediation execution | Executes approved actions via SSM |
+| `outageshield-postmortem-dev` | Postmortem generation | AI prevention recommendations based on RCA category |
+| `outageshield-notification-dev` | Notifications | SNS, Slack, PagerDuty alerts, escalation |
+| `outageshield-ticket-dev` | Ticket creation | Jira and ServiceNow integration |
+| `outageshield-dashboard-api-dev` | Dashboard API | REST API for UI, incident CRUD operations |
+
+---
+
 ## Project Structure
 
 ```
@@ -127,11 +418,17 @@ OutageShield AI/
 ├── UI/                          # React Dashboard
 │   ├── src/
 │   │   ├── components/          # Reusable UI components
+│   │   ├── hooks/               # Custom React hooks
 │   │   ├── pages/               # Page components
 │   │   │   ├── Dashboard.tsx    # Main incident dashboard
-│   │   │   ├── IncidentDetail.tsx
-│   │   │   ├── Postmortems.tsx
-│   │   │   └── ServiceRisk.tsx
+│   │   │   ├── IncidentDetail.tsx  # Incident details with RCA badges
+│   │   │   ├── Incidents.tsx    # Incidents list
+│   │   │   ├── Login.tsx        # Authentication
+│   │   │   ├── Notifications.tsx
+│   │   │   ├── PagerDutyDetail.tsx
+│   │   │   ├── Postmortems.tsx  # Postmortem list and details
+│   │   │   ├── SnsDetail.tsx
+│   │   │   └── TicketDetail.tsx
 │   │   ├── services/
 │   │   │   ├── api.ts           # API client
 │   │   │   └── websocket.ts     # Real-time updates
@@ -139,7 +436,7 @@ OutageShield AI/
 │   ├── package.json
 │   └── vite.config.ts
 │
-├── stacks/                      # CloudFormation Stacks
+├── stacks/                      # CloudFormation Stacks (15 stacks)
 │   ├── 01-ingestion-stack.yaml      # EventBridge, Kinesis
 │   ├── 02-storage-stack.yaml        # DynamoDB, OpenSearch
 │   ├── 03-detection-stack.yaml      # Detection Lambda
@@ -153,27 +450,48 @@ OutageShield AI/
 │   ├── 11-websocket-stack.yaml      # WebSocket API
 │   ├── 12-cloudfront-stack.yaml     # CloudFront + S3
 │   ├── 13-bedrock-agent-stack.yaml  # Bedrock Agent + Action Lambda
-│   ├── 14-cloudtrail-deployments-stack.yaml
+│   ├── 14-cloudtrail-deployments-stack.yaml  # CloudTrail deployment tracking
 │   ├── 15-xray-config-stack.yaml    # X-Ray + Config integration
-│   └── deploy.sh
+│   ├── stepfunctions/               # Step Functions definitions
+│   ├── deploy.sh
+│   └── README.md
 │
 ├── scripts/
 │   ├── lambdas/                 # Lambda deployment scripts
-│   │   ├── add-xray-config-tools.py
-│   │   ├── update-agent-invoker.py
-│   │   ├── update-remediation-lambda2.py
-│   │   ├── update-correlation-lambda.py
-│   │   └── ...
-│   ├── reset-with-real-data.py  # Seed data and trigger incidents
-│   └── rebuild-layer.py         # Rebuild Lambda layers
+│   │   ├── create-summary-lambda.py          # AI summary generation
+│   │   ├── update-agent-actions-all-tools.py # 6 agent tools
+│   │   ├── update-agent-invoker.py           # Bedrock agent orchestration
+│   │   ├── update-correlation-lambda.py      # Context correlation
+│   │   ├── update-detection-opensearch.py    # Detection with OpenSearch
+│   │   ├── update-postmortem-lambda.py       # AI prevention recommendations
+│   │   ├── update-rca-lambda-v2.py           # RCA with category classification
+│   │   ├── update-remediation-lambda2.py     # 9 data-driven recommendations
+│   │   └── update-scoring-lambda.py          # Severity scoring
+│   │
+│   ├── tests/                   # Test and verification scripts
+│   │   ├── analyze-actions.py
+│   │   ├── check-agent-config.py
+│   │   ├── check-ai-reasoning.py
+│   │   ├── check-counts.py
+│   │   ├── check-deployments-table.py
+│   │   ├── check-postmortem.py
+│   │   ├── check-rca-categories.py           # Verify RCA category distribution
+│   │   ├── full-workflow-test.py             # End-to-end workflow test
+│   │   ├── generate-new-postmortem.py
+│   │   ├── query-opensearch.py               # Query OpenSearch logs
+│   │   ├── regenerate-all-postmortems.py     # Regenerate with AI prevention
+│   │   ├── test-single-incident.py           # Test workflow for one incident
+│   │   └── test-summary-lambda.py
+│   │
+│   └── sync-lambdas-to-stacks.py    # Sync Lambda code to stacks
 │
 ├── dashboard-api-code/          # Dashboard API Lambda
 │   └── index.py
 │
 ├── docs/
-│   ├── data-ingestion-guide.md
-│   ├── continuous-learning.md
-│   └── lambda-stack-alignment.md
+│   ├── continuous-learning.md       # Continuous learning documentation
+│   ├── data-ingestion-guide.md      # Data ingestion guide
+│   └── lambda-stack-alignment.md    # Lambda-stack mapping reference
 │
 └── README.md
 ```
@@ -219,12 +537,14 @@ OutageShield AI/
 | `outageshield-deployments-dev` | `deployment_id` | Deployment history (GSI: service-timestamp) |
 | `outageshield-postmortems-dev` | `postmortem_id` | Generated postmortems |
 | `outageshield-workflow-state-dev` | `workflow_id` | Workflow execution state |
+| `outageshield-approvals-dev` | `approval_id` | Human approval requests |
+| `outageshield-ai-reasoning-dev` | `incident_id` | AI reasoning, summary, and recommendations |
 
 ---
 
 ## Runbook Types
 
-The system includes 8 pre-configured runbooks:
+The system includes 9 pre-configured runbooks:
 
 | Runbook ID | Title | Category |
 |------------|-------|----------|
@@ -236,6 +556,7 @@ The system includes 8 pre-configured runbooks:
 | `QueueBacklog` | Message Queue Backlog | scaling |
 | `AuthFailures` | Authentication Failures | manual_intervention |
 | `CacheMissRate` | High Cache Miss Rate | configuration_change |
+| `DiskUsage` | Disk Usage Critical | configuration_change |
 
 ---
 
@@ -265,17 +586,32 @@ aws cloudformation deploy \
 ### Deploy Lambda Code
 
 ```bash
-# Deploy agent actions Lambda (6 tools)
-python scripts/lambdas/add-xray-config-tools.py
+# Deploy detection Lambda
+python scripts/lambdas/update-detection-opensearch.py
+
+# Deploy correlation Lambda
+python scripts/lambdas/update-correlation-lambda.py
+
+# Deploy scoring Lambda
+python scripts/lambdas/update-scoring-lambda.py
+
+# Deploy RCA Lambda (with category classification)
+python scripts/lambdas/update-rca-lambda-v2.py
 
 # Deploy agent invoker Lambda
 python scripts/lambdas/update-agent-invoker.py
 
-# Deploy remediation Lambda
+# Deploy agent actions Lambda (6 tools)
+python scripts/lambdas/update-agent-actions-all-tools.py
+
+# Deploy remediation Lambda (9 recommendations)
 python scripts/lambdas/update-remediation-lambda2.py
 
-# Deploy correlation Lambda
-python scripts/lambdas/update-correlation-lambda.py
+# Deploy summary Lambda (AI summary generation)
+python scripts/lambdas/create-summary-lambda.py
+
+# Deploy postmortem Lambda (AI prevention recommendations)
+python scripts/lambdas/update-postmortem-lambda.py
 ```
 
 ### Build and Deploy UI
@@ -301,8 +637,63 @@ aws cloudfront create-invalidation \
 ### Seed Sample Data
 
 ```bash
-# Seed runbooks, deployments, and trigger test incidents
-python scripts/reset-with-real-data.py
+# Generate test incidents (creates 100 incidents across 15 services)
+# Note: Run from project root
+python scripts/tests/full-workflow-test.py
+```
+
+---
+
+## Testing
+
+### Test Scripts
+
+```bash
+# Test full workflow for a specific incident
+python scripts/tests/test-single-incident.py INC-XXXXXXXX
+
+# Full end-to-end workflow test
+python scripts/tests/full-workflow-test.py
+
+# Check RCA category distribution across all incidents
+python scripts/tests/check-rca-categories.py
+
+# Regenerate postmortems with AI prevention recommendations
+python scripts/tests/regenerate-all-postmortems.py
+
+# Query OpenSearch logs
+python scripts/tests/query-opensearch.py
+
+# Check AI reasoning data
+python scripts/tests/check-ai-reasoning.py
+
+# Check postmortem content
+python scripts/tests/check-postmortem.py
+
+# Check agent configuration
+python scripts/tests/check-agent-config.py
+
+# Check deployments table
+python scripts/tests/check-deployments-table.py
+
+# Test summary Lambda
+python scripts/tests/test-summary-lambda.py
+```
+
+### Verification Commands
+
+```bash
+# Check incident count
+aws dynamodb scan --table-name outageshield-incidents-dev --select COUNT
+
+# Check postmortem count
+aws dynamodb scan --table-name outageshield-postmortems-dev --select COUNT
+
+# View recent incidents
+aws dynamodb scan --table-name outageshield-incidents-dev \
+  --projection-expression "incident_id,service,#s,severity_score" \
+  --expression-attribute-names '{"#s":"status"}' \
+  --max-items 10
 ```
 
 ---
@@ -365,7 +756,22 @@ VITE_COGNITO_CLIENT_ID=xxxxx
       ▼                    ▼                   ▼                  ▼
    Signal              RCA + Agent        Remediation        Postmortem
    Generated           Investigation       Executed          Generated
+                            │
+                            ▼
+                       AI Summary
+                       Generated
 ```
+
+### Workflow States
+
+| State | Description |
+|-------|-------------|
+| `investigating` | Initial state, correlation and RCA in progress |
+| `awaiting_approval` | Human approval required for remediation |
+| `executing` | Remediation action being executed |
+| `mitigating` | Remediation complete, monitoring for resolution |
+| `resolved` | Incident fully resolved |
+| `degraded` | Workflow completed with errors |
 
 ---
 

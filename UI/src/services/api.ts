@@ -13,6 +13,7 @@ const API_BASE = import.meta.env.VITE_API_URL || '/dev'
 export interface RootCauseEntry {
   description: string
   confidence: number
+  category?: string
   evidence?: string[]
 }
 
@@ -44,6 +45,25 @@ export interface Incident {
   // PagerDuty integration
   pagerduty_id?: string
   pagerduty_url?: string
+  // AI Reasoning data
+  ai_reasoning?: AIReasoning
+}
+
+export interface AIReasoning {
+  ai_summary?: string
+  investigation_summary?: string
+  root_cause?: string
+  recommended_action?: {
+    type?: string
+    description?: string
+    confidence?: number
+    estimated_ttr_minutes?: number
+    risk?: string
+    reasoning?: string
+  }
+  quick_actions?: Array<{ label: string; command: string }>
+  total_recommendations?: number
+  data_sources_analyzed?: number
 }
 
 export interface Recommendation {
@@ -138,6 +158,19 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AI Reasoning
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function getAIReasoning(incidentId: string): Promise<AIReasoning | null> {
+  try {
+    const data = await fetchJson<AIReasoning>(`/ai-reasoning/${incidentId}`)
+    return data
+  } catch {
+    return null
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Incidents
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -203,6 +236,7 @@ function mapIncident(raw: any): Incident {
       .map((item: any) => ({
         description: String(item.description || ''),
         confidence: Number(item.confidence ?? 0),
+        category: item.category ? String(item.category) : undefined,
         evidence: Array.isArray(item.evidence)
           ? item.evidence.map(String)
           : item.evidence && !String(item.evidence).includes('Parse error:')
