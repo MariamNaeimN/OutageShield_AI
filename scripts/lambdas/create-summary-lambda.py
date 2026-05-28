@@ -117,11 +117,11 @@ def generate_summary(incident_id, service, alarm_name, severity, business_impact
     # Analyze recommendations to find the best one
     best_recommendation = find_best_recommendation(recommendations)
     
-    # Categorize recommendations
-    scaling_recs = [r for r in recommendations if r.get('category') == 'scaling']
-    rollback_recs = [r for r in recommendations if r.get('category') == 'rollback']
-    config_recs = [r for r in recommendations if r.get('category') == 'configuration_change']
-    manual_recs = [r for r in recommendations if r.get('category') == 'manual_intervention']
+    # Categorize recommendations - map various category names to standard groups
+    scaling_recs = [r for r in recommendations if r.get('category') in ['scaling', 'immediate_mitigation', 'capacity']]
+    rollback_recs = [r for r in recommendations if r.get('category') in ['rollback', 'deployment']]
+    config_recs = [r for r in recommendations if r.get('category') in ['configuration_change', 'configuration', 'config']]
+    manual_recs = [r for r in recommendations if r.get('category') in ['manual_intervention', 'manual_investigation', 'monitoring', 'root_cause_remediation', 'prevention']]
     
     # Build investigation summary
     investigation_summary = summarize_investigation(agent_investigation)
@@ -340,6 +340,39 @@ def generate_ai_summary(service, alarm_name, severity, root_cause_summary,
     action_reasoning = best_recommendation.get('reasoning', '') if best_recommendation else ''
     action_source = best_recommendation.get('source', '') if best_recommendation else ''
     
+    # Detect special cases for better prompting
+    alarm_lower = alarm_name.lower() if alarm_name else ''
+    is_eventbridge_failure = 'failedinvocation' in alarm_lower or ('failed' in alarm_lower and 'invocation' in alarm_lower)
+    is_recurring = 'recurring' in action_desc.lower() if action_desc else False
+    is_renewal_service = 'renewal' in alarm_lower or 'subscription' in alarm_lower
+    is_scheduled_job = 'monitor' in alarm_lower or 'schedule' in alarm_lower or 'cron' in alarm_lower
+    
+    # Build context-specific guidance
+    special_context = ""
+    if is_eventbridge_failure:
+        special_context = """
+SPECIAL CONTEXT: This is an EventBridge FailedInvocations alarm. Common causes:
+- Lambda function throttling (check concurrent execution limits)
+- IAM permission issues (EventBridge can't invoke Lambda)
+- Lambda function errors on startup
+- Target Lambda doesn't exist or was deleted
+Focus on Lambda permissions, throttling, and function health."""
+    elif is_recurring:
+        special_context = """
+SPECIAL CONTEXT: This is a RECURRING issue that has triggered multiple times.
+This indicates a persistent problem, not a transient spike.
+Recommend a PERMANENT fix, not just immediate remediation."""
+    elif is_renewal_service:
+        special_context = """
+SPECIAL CONTEXT: This affects a renewal/subscription service.
+Failures here can cause missed renewals, revenue loss, and customer churn.
+Check payment gateway connectivity, database access, and external API dependencies."""
+    elif is_scheduled_job:
+        special_context = """
+SPECIAL CONTEXT: This is a scheduled/cron job failure.
+Check if the EventBridge rule is enabled, Lambda has correct permissions,
+and the function isn't timing out or hitting memory limits."""
+
     prompt = f"""You are a senior SRE engineer writing a technical incident summary for developers. Be specific and actionable.
 
 INCIDENT CONTEXT:
@@ -349,6 +382,7 @@ INCIDENT CONTEXT:
 - Root Cause: {root_cause_summary}
 - Investigation Findings: {investigation_summary}
 - Evidence: {action_reasoning[:500] if action_reasoning else 'No specific evidence'}
+{special_context}
 
 RECOMMENDED ACTION:
 - Type: {action_type}
@@ -358,9 +392,9 @@ RECOMMENDED ACTION:
 AVAILABLE OPTIONS: {scaling_count} scaling actions, {rollback_count} rollback options, {config_count} config changes
 
 Write a 3-4 sentence technical summary that:
-1. States the SPECIFIC problem (e.g., "5xx errors spiked to 12% due to...")
-2. Identifies the LIKELY CAUSE with evidence (e.g., "Correlated with deployment at 14:30 UTC...")
-3. Recommends the EXACT action to take (e.g., "Scale to 4 instances" or "Rollback deployment v2.3.1")
+1. States the SPECIFIC problem (e.g., "EventBridge rule failing to invoke Lambda" or "5xx errors spiked to 12%")
+2. Identifies the LIKELY CAUSE with evidence (e.g., "Lambda throttling due to concurrent execution limit" or "Correlated with deployment at 14:30 UTC")
+3. Recommends the EXACT action to take (e.g., "Increase reserved concurrency to 100" or "Check Lambda IAM permissions")
 4. Mentions any RISKS or things to monitor after the fix
 
 Be direct and technical. Use specific numbers, service names, and metrics when available. No fluff."""
@@ -573,6 +607,48 @@ def generate_smart_quick_actions(recommendations, service, alarm_name, root_caus
     
     # STEP 3: Add category-specific fix commands based on recommendations
     categories_found = set(r.get('category', '') for r in recommendations)
+    
+    # Check for EventBridge/Lambda invocation failures
+    alarm_lower = alarm_name.lower() if alarm_name else ''
+    is_eventbridge_failure = 'failedinvocation' in alarm_lower or ('failed' in alarm_lower and 'invocation' in alarm_lower)
+    is_scheduled_job = 'monitor' in alarm_lower or 'schedule' in alarm_lower or 'cron' in alarm_lower
+    
+    if is_eventbridge_failure or is_scheduled_job:
+        # Extract rule name from investigation if available
+        import re
+        rule_match = re.search(r'RuleName[=:,\s]*([^\s,\]\)]+)', agent_investigation or '')
+        rule_name = rule_match.group(1) if rule_match else f'{service}-schedule'
+        
+        actions.insert(0, {
+            'label': '🔍 Check EventBridge Rule Status',
+            'command': f'aws events describe-rule --name {rule_name}',
+            'source': 'eventbridge',
+            'priority': 1
+        })
+        actions.insert(1, {
+            'label': '🔐 Check Lambda Permissions for EventBridge',
+            'command': f'aws lambda get-policy --function-name {service} 2>/dev/null || echo "No resource policy - EventBridge may not have invoke permission"',
+            'source': 'eventbridge',
+            'priority': 1
+        })
+        actions.insert(2, {
+            'label': '📊 Check Lambda Throttling',
+            'command': f'aws cloudwatch get-metric-statistics --namespace AWS/Lambda --metric-name Throttles --dimensions Name=FunctionName,Value={service} --period 300 --statistics Sum --start-time $(date -u -d "1 hour ago" +%Y-%m-%dT%H:%M:%SZ) --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ)',
+            'source': 'eventbridge',
+            'priority': 1
+        })
+        actions.insert(3, {
+            'label': '⚡ Check Lambda Concurrent Executions',
+            'command': f'aws lambda get-function-concurrency --function-name {service}',
+            'source': 'eventbridge',
+            'priority': 1
+        })
+        actions.insert(4, {
+            'label': '📜 Check Lambda Recent Errors',
+            'command': f'aws logs filter-log-events --log-group-name /aws/lambda/{service} --filter-pattern "ERROR" --start-time $(date -u -d "1 hour ago" +%s)000 --limit 20',
+            'source': 'eventbridge',
+            'priority': 2
+        })
     
     if 'scaling' in categories_found:
         # Find the scaling recommendation details

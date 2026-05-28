@@ -20,7 +20,9 @@ OutageShield AI is an enterprise-grade incident management platform that leverag
 - **🤖 AI-Powered Root Cause Analysis** - Amazon Bedrock agent autonomously investigates incidents using 6 specialized tools with categorized root causes
 - **🏷️ RCA Categorization** - Automatic classification of root causes into 5 categories: capacity, performance, configuration, deployment, dependency
 - **📊 Intelligent Correlation** - Links alerts with deployments, config changes, and historical incidents
-- **💡 Smart Remediation** - Generates 9 ranked recommendations with anti-hallucination rules - all recommendations are data-driven from actual investigation findings
+- **💡 Source-Based Remediation** - Generates recommendations that cite specific investigation sources (OpenSearch, X-Ray, Runbook, Deployments, Config, Incident History)
+- **📈 Downstream Impact Scoring** - Estimates affected users based on the monitored service's business function, not the monitor itself
+- **💰 AWS Cost-Based Revenue** - Calculates revenue at risk using actual CloudWatch metrics and AWS pricing
 - **📋 AI Summary Generation** - Produces actionable summaries with best remediation suggestion and quick action commands
 - **🎫 Ticketing Integration** - Automatic Jira, PagerDuty, and ServiceNow ticket creation
 - **📱 Real-time Dashboard** - React-based incident command center with WebSocket updates and color-coded RCA category badges
@@ -61,12 +63,29 @@ The RCA Lambda uses Amazon Bedrock (Claude 3 Haiku) to analyze incident context 
 - Category classification (capacity/performance/configuration/deployment/dependency)
 - Supporting evidence from logs, metrics, and traces
 
+### Business Impact Scoring
+The scoring Lambda calculates business impact with:
+- **Downstream impact estimation** - Shows users affected by the monitored service, not the monitor itself
+- **AWS cost-based revenue** - Queries CloudWatch for actual Lambda invocations and calculates cost per hour
+- **Service classification** by business function (critical_revenue, business_critical, user_facing, infrastructure, data, messaging)
+- Extracts core service name from monitoring alarms (e.g., `legalmind-renewal` from `legalmind-dev-alarm-renewal-monitor-failed`)
+
 ### Remediation Recommendations
-The system generates 9 data-driven recommendations with **anti-hallucination rules**:
-- All recommendations must be based on actual tool findings
-- X-Ray showing 0 requests = "No traces found" (not "healthy")
-- Log patterns only claim errors when actual error codes are found
-- Each recommendation includes: confidence %, risk level, estimated TTR, and data source
+The system generates **source-based recommendations** that cite specific investigation sources:
+
+| Investigation Source | Data Used | Example Recommendation |
+|---------------------|-----------|------------------------|
+| **OpenSearch Logs** | Log entries, alarm occurrences | "OpenSearch shows 6 Threshold Crossed events - increase alarm threshold" |
+| **X-Ray Traces** | Requests, errors, faults, latency | "X-Ray shows 0 requests - enable tracing" |
+| **Runbook DB** | Available runbooks, steps | "Follow 5-step runbook for troubleshooting" |
+| **Deployment History** | Recent deployments, config changes | "No deployments found - investigate non-deployment causes" |
+| **AWS Config** | Compliance issues, drift | "Found 1 non-compliant resource - fix config" |
+| **Incident History** | Past similar incidents | "3 past incidents found - implement permanent fix" |
+
+**Anti-hallucination rules enforced**:
+- Won't recommend rollback if no deployments found
+- Won't claim "service healthy" if X-Ray shows 0 requests
+- Each recommendation cites its source in the reasoning field
 
 ### AI Prevention Recommendations
 Postmortems include LLM-generated long-term prevention steps based on:

@@ -148,6 +148,87 @@ def generate_ai_recommendations(sources, root_causes, service, alarm_name):
             'confidence': 75
         })
     
+    # EventBridge/Lambda invocation failures
+    if 'failedinvocation' in alarm_lower or 'failed' in alarm_lower or 'invocation' in alarm_lower:
+        # Extract the rule name from alarm if present
+        import re
+        rule_match = re.search(r'RuleName[=:]\s*([^\s,\]]+)', str(sources))
+        rule_name = rule_match.group(1) if rule_match else 'the scheduled rule'
+        
+        recommendations.append({
+            'category': 'configuration_change',
+            'description': f'EventBridge rule invocation failing. Check Lambda function permissions, resource limits, and target configuration for {rule_name}.',
+            'reasoning': f'FailedInvocations metric indicates EventBridge cannot invoke the target Lambda. Common causes: Lambda throttling, permission issues, or function errors.',
+            'source': 'AGENT:alarm_analysis',
+            'effectiveness': 5,
+            'risk': 'low',
+            'estimated_ttr_minutes': 15,
+            'confidence': 90
+        })
+        recommendations.append({
+            'category': 'configuration_change',
+            'description': f'Check Lambda concurrent execution limits and reserved concurrency settings.',
+            'reasoning': f'If Lambda is throttled, EventBridge invocations will fail. Increase reserved concurrency or account limits.',
+            'source': 'AGENT:alarm_analysis',
+            'effectiveness': 4,
+            'risk': 'low',
+            'estimated_ttr_minutes': 10,
+            'confidence': 85
+        })
+        recommendations.append({
+            'category': 'manual_intervention',
+            'description': f'Review CloudWatch Logs for the target Lambda function to identify invocation errors.',
+            'reasoning': f'Lambda logs will show if the function is failing on startup, timing out, or encountering runtime errors.',
+            'source': 'AGENT:alarm_analysis',
+            'effectiveness': 4,
+            'risk': 'low',
+            'estimated_ttr_minutes': 10,
+            'confidence': 85
+        })
+    
+    # Renewal/subscription service issues
+    if 'renewal' in alarm_lower or 'subscription' in alarm_lower:
+        recommendations.append({
+            'category': 'manual_intervention',
+            'description': f'Renewal/subscription job failing. Check payment gateway connectivity, database access, and external API dependencies.',
+            'reasoning': f'Renewal jobs often fail due to third-party API issues (payment processors, billing systems) or database connectivity.',
+            'source': 'AGENT:alarm_analysis',
+            'effectiveness': 4,
+            'risk': 'low',
+            'estimated_ttr_minutes': 20,
+            'confidence': 80
+        })
+    
+    # Monitor/scheduled job failures
+    if 'monitor' in alarm_lower or 'schedule' in alarm_lower or 'cron' in alarm_lower:
+        recommendations.append({
+            'category': 'configuration_change',
+            'description': f'Scheduled job failing. Verify the EventBridge rule is enabled and the target Lambda has correct IAM permissions.',
+            'reasoning': f'Scheduled jobs can fail silently if IAM permissions are incorrect or the rule is disabled.',
+            'source': 'AGENT:alarm_analysis',
+            'effectiveness': 4,
+            'risk': 'low',
+            'estimated_ttr_minutes': 15,
+            'confidence': 85
+        })
+    
+    # Check for recurring alarm pattern in logs
+    log_data = sources.get('opensearch', '')
+    if log_data:
+        # Count how many times the same alarm appears
+        alarm_occurrences = log_data.lower().count('threshold crossed')
+        if alarm_occurrences >= 3:
+            recommendations.insert(0, {
+                'category': 'configuration_change',
+                'description': f'RECURRING ISSUE: This alarm has triggered {alarm_occurrences}+ times recently. This indicates a persistent problem requiring permanent fix, not just remediation.',
+                'reasoning': f'Pattern detected: {alarm_occurrences} threshold breaches in logs. Consider: adjusting alarm threshold, fixing underlying issue, or implementing auto-remediation.',
+                'source': 'AGENT:pattern_analysis',
+                'effectiveness': 5,
+                'risk': 'medium',
+                'estimated_ttr_minutes': 60,
+                'confidence': 95
+            })
+    
     # 1. DEPLOYMENT CORRELATION - check for actual deployment data
     deployment_data = sources.get('deployment', '')
     deployment_lower = deployment_data.lower() if deployment_data else ''

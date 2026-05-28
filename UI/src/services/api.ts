@@ -318,7 +318,11 @@ function parseRecommendations(raw: unknown): Recommendation[] {
   
   // Filter out RCA entries (they have description+confidence+evidence but no category)
   // Only return actual recommendations that have a category field
-  const validCategories = ['rollback', 'scaling', 'configuration_change', 'manual_intervention', 'manual', 'config']
+  const validCategories = [
+    'rollback', 'scaling', 'configuration_change', 'manual_intervention', 'manual', 'config',
+    'immediate_mitigation', 'root_cause_remediation', 'prevention', 'monitoring', 'configuration',
+    'capacity', 'deployment', 'dependency', 'investigation', 'manual_investigation'
+  ]
   
   // Filter out "no data found" type recommendations
   const isNoDataRecommendation = (desc: string): boolean => {
