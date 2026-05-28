@@ -3,14 +3,19 @@ import boto3
 import os
 
 dynamodb = boto3.resource('dynamodb')
+sfn = boto3.client('stepfunctions')
 
 def lambda_handler(event, context):
     """
     Dashboard API: Serves data for the Incident Command Dashboard.
-    Routes: /incidents, /incidents/{id}, /risk, /postmortems, /events, /ai-reasoning/{id}
+    Routes: /incidents, /incidents/{id}, /risk, /postmortems, /events, /ai-reasoning/{id}, /approve/{id}
     """
     path = event.get('path', '/')
     method = event.get('httpMethod', 'GET')
+
+    # Handle CORS preflight
+    if method == 'OPTIONS':
+        return response(200, {})
 
     if path == '/incidents' and method == 'GET':
         return get_active_incidents()
@@ -26,6 +31,11 @@ def lambda_handler(event, context):
     elif path.startswith('/ai-reasoning/') and method == 'GET':
         incident_id = path.split('/')[-1]
         return get_ai_reasoning(incident_id)
+    elif path.startswith('/approve/') and method == 'POST':
+        approval_id = path.split('/')[-1]
+        return handle_approval(approval_id, event)
+    elif path == '/approval/callback' and method == 'POST':
+        return handle_servicenow_callback(event)
     else:
         return response(404, {'error': 'Not found'})
 
@@ -173,12 +183,264 @@ def get_ai_reasoning(incident_id):
         return response(200, item)
     return response(404, {'error': 'AI reasoning not found for this incident'})
 
+def handle_approval(approval_id, event):
+    """
+    Handle human approval/rejection from the dashboard.
+    Retrieves task token from DynamoDB and resumes Step Functions.
+    """
+    from datetime import datetime, timezone
+    
+    # Parse request body
+    body = event.get('body', '{}')
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except:
+            body = {}
+    
+    decision = body.get('decision', 'approved')
+    responder = body.get('responder', 'dashboard-user')
+    
+    if decision not in ['approved', 'rejected']:
+        return response(400, {'error': 'Invalid decision. Must be "approved" or "rejected"'})
+    
+    # Get task token from approvals table
+    approvals_table = dynamodb.Table(os.environ.get('APPROVALS_TABLE', 'outageshield-approvals-dev'))
+    
+    try:
+        result = approvals_table.get_item(Key={'approval_id': approval_id})
+        item = result.get('Item')
+    except Exception as e:
+        print(f"DynamoDB error: {e}")
+        return response(500, {'error': f'Database error: {str(e)}'})
+    
+    if not item:
+        return response(404, {'error': f'Approval request {approval_id} not found'})
+    
+    if item.get('status') != 'pending':
+        return response(409, {
+            'error': 'Approval already processed',
+            'status': item.get('status'),
+            'responded_at': item.get('responded_at')
+        })
+    
+    task_token = item.get('task_token')
+    incident_id = item.get('incident_id', approval_id)
+    
+    if not task_token:
+        return response(400, {'error': 'No task token found for this approval'})
+    
+    now = datetime.now(timezone.utc).isoformat()
+    
+    # Update approval record
+    approvals_table.update_item(
+        Key={'approval_id': approval_id},
+        UpdateExpression='SET #s = :status, responded_at = :ts, responder = :resp, decision = :dec',
+        ExpressionAttributeNames={'#s': 'status'},
+        ExpressionAttributeValues={
+            ':status': decision,
+            ':ts': now,
+            ':resp': responder,
+            ':dec': decision
+        }
+    )
+    print(f"Updated approval {approval_id} to {decision}")
+    
+    # Update incident status
+    try:
+        incidents_table = dynamodb.Table(os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev'))
+        new_status = 'Mitigating' if decision == 'approved' else 'Investigating'
+        incidents_table.update_item(
+            Key={'incident_id': incident_id},
+            UpdateExpression='SET #s = :status, approval_decision = :dec, approved_by = :by, approved_at = :ts',
+            ExpressionAttributeNames={'#s': 'status'},
+            ExpressionAttributeValues={
+                ':status': new_status,
+                ':dec': decision,
+                ':by': responder,
+                ':ts': now
+            }
+        )
+        print(f"Updated incident {incident_id} status to {new_status}")
+    except Exception as e:
+        print(f"Failed to update incident status: {e}")
+    
+    # Resume Step Functions
+    try:
+        if decision == 'approved':
+            sfn.send_task_success(
+                taskToken=task_token,
+                output=json.dumps({
+                    'decision': 'approved',
+                    'responder': responder,
+                    'responded_at': now
+                })
+            )
+            print(f"Sent SendTaskSuccess for {approval_id}")
+        else:
+            sfn.send_task_failure(
+                taskToken=task_token,
+                error='ApprovalRejected',
+                cause=f'Rejected by {responder}'
+            )
+            print(f"Sent SendTaskFailure for {approval_id}")
+    except Exception as e:
+        print(f"Failed to resume Step Functions: {e}")
+        return response(500, {'error': f'Failed to resume workflow: {str(e)}'})
+    
+    return response(200, {
+        'success': True,
+        'approvalId': approval_id,
+        'decision': decision,
+        'responder': responder,
+        'message': f'Remediation {decision}. Workflow will {"continue" if decision == "approved" else "be notified"}.'
+    })
+
+
+def handle_servicenow_callback(event):
+    """
+    Handle callback from ServiceNow when a change request is approved/rejected.
+    ServiceNow sends: incident_id, task_token, action (approve/reject), approved_by/rejected_by, change_number
+    """
+    from datetime import datetime, timezone
+    
+    print(f"ServiceNow callback received: {event}")
+    
+    # Parse request body
+    body = event.get('body', '{}')
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except:
+            body = {}
+    
+    print(f"Parsed body: {body}")
+    
+    incident_id = body.get('incident_id')
+    task_token = body.get('task_token')
+    # ServiceNow sends 'action' as 'approve' or 'reject'
+    action = body.get('action', body.get('decision', 'reject'))
+    approver = body.get('approved_by') or body.get('rejected_by') or body.get('approver', 'servicenow-user')
+    change_number = body.get('change_number', '')
+    
+    print(f"ServiceNow callback: incident={incident_id}, action={action}, approver={approver}, change={change_number}")
+    
+    if not incident_id:
+        return response(400, {'error': 'Missing incident_id'})
+    
+    # Normalize decision
+    if action.lower() in ['approved', 'approve', 'yes']:
+        decision = 'approved'
+    else:
+        decision = 'rejected'
+    
+    now = datetime.now(timezone.utc).isoformat()
+    
+    # Get task token from approvals table if not provided
+    approvals_table = dynamodb.Table(os.environ.get('APPROVALS_TABLE', 'outageshield-approvals-dev'))
+    
+    if not task_token:
+        try:
+            # Try with incident_id as approval_id
+            result = approvals_table.get_item(Key={'approval_id': incident_id})
+            item = result.get('Item')
+            if item:
+                task_token = item.get('task_token')
+                print(f"Found task token from approvals table")
+            else:
+                # Try scanning for incident_id
+                scan_result = approvals_table.scan(
+                    FilterExpression='incident_id = :iid',
+                    ExpressionAttributeValues={':iid': incident_id}
+                )
+                if scan_result.get('Items'):
+                    task_token = scan_result['Items'][0].get('task_token')
+                    print(f"Found task token via scan")
+        except Exception as e:
+            print(f"Error getting task token: {e}")
+    
+    # Update approval record
+    try:
+        approvals_table.update_item(
+            Key={'approval_id': incident_id},
+            UpdateExpression='SET #s = :status, responded_at = :ts, responder = :resp, decision = :dec, servicenow_approved = :sn',
+            ExpressionAttributeNames={'#s': 'status'},
+            ExpressionAttributeValues={
+                ':status': decision,
+                ':ts': now,
+                ':resp': f'ServiceNow: {approver}',
+                ':dec': decision,
+                ':sn': True
+            }
+        )
+        print(f"Updated approval {incident_id} to {decision}")
+    except Exception as e:
+        print(f"Failed to update approval: {e}")
+    
+    # Update incident status - THIS IS THE KEY PART
+    try:
+        incidents_table = dynamodb.Table(os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev'))
+        new_status = 'Mitigating' if decision == 'approved' else 'Rejected'
+        incidents_table.update_item(
+            Key={'incident_id': incident_id},
+            UpdateExpression='SET #s = :status, approval_decision = :dec, approved_by = :by, approved_at = :ts',
+            ExpressionAttributeNames={'#s': 'status'},
+            ExpressionAttributeValues={
+                ':status': new_status,
+                ':dec': decision,
+                ':by': f'ServiceNow: {approver}',
+                ':ts': now
+            }
+        )
+        print(f"Updated incident {incident_id} status to {new_status}")
+    except Exception as e:
+        print(f"Failed to update incident status: {e}")
+    
+    # Resume Step Functions if we have a task token
+    if task_token:
+        try:
+            if decision == 'approved':
+                sfn.send_task_success(
+                    taskToken=task_token,
+                    output=json.dumps({
+                        'decision': 'approved',
+                        'responder': f'ServiceNow: {approver}',
+                        'responded_at': now,
+                        'servicenow_change': change_number
+                    })
+                )
+                print(f"Sent SendTaskSuccess for {incident_id}")
+            else:
+                sfn.send_task_failure(
+                    taskToken=task_token,
+                    error='ApprovalRejected',
+                    cause=f'Rejected by ServiceNow: {approver}'
+                )
+                print(f"Sent SendTaskFailure for {incident_id}")
+        except Exception as e:
+            print(f"Failed to resume Step Functions: {e}")
+            # Don't fail the callback - the approval is still recorded
+    else:
+        print(f"No task token found - incident status updated but workflow not resumed")
+    
+    return response(200, {
+        'success': True,
+        'incident_id': incident_id,
+        'decision': decision,
+        'new_status': 'Mitigating' if decision == 'approved' else 'Rejected',
+        'approver': approver,
+        'message': f'ServiceNow approval processed: {decision}'
+    })
+
+
 def response(status_code, body):
     return {
         'statusCode': status_code,
         'headers': {
             'Content-Type': 'application/json',
-            'Access-Control-Allow-Origin': '*'
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Headers': 'Content-Type,Authorization',
+            'Access-Control-Allow-Methods': 'GET,POST,OPTIONS'
         },
         'body': json.dumps(body, default=str)
     }

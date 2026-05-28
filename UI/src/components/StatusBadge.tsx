@@ -20,6 +20,7 @@ function getStatusConfig(status: string) {
     case 'Mitigating': return { classes: 'bg-amber-950/50 text-amber-300', dot: 'bg-amber-400' }
     case 'Resolved': return { classes: 'bg-green-950/50 text-green-300', dot: 'bg-green-400' }
     case 'Awaiting Approval': return { classes: 'bg-yellow-950/50 text-yellow-300', dot: 'bg-yellow-400 animate-pulse' }
+    case 'Approved': return { classes: 'bg-green-950/50 text-green-300', dot: 'bg-green-400' }
     default: return { classes: 'bg-gray-800 text-gray-400', dot: 'bg-gray-500' }
   }
 }

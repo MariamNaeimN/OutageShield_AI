@@ -208,6 +208,37 @@ Resources:
         PointInTimeRecoveryEnabled: true
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # DynamoDB - Rejection Memories Table
+  # Stores rejected remediation decisions for learning and future reference
+  # ─────────────────────────────────────────────────────────────────────────────
+  RejectionMemoriesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub outageshield-rejection-memories-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: rejection_id
+          AttributeType: S
+        - AttributeName: service
+          AttributeType: S
+        - AttributeName: rejected_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: rejection_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: service-rejected-index
+          KeySchema:
+            - AttributeName: service
+              KeyType: HASH
+            - AttributeName: rejected_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # OpenSearch Serverless — Encryption Policy
   # ─────────────────────────────────────────────────────────────────────────────
   OpenSearchEncryptionPolicy:
@@ -332,6 +363,18 @@ Outputs:
     Value: !GetAtt DeploymentsTable.Arn
     Export:
       Name: !Sub outageshield-storage-${Environment}-DeploymentsTableArn
+
+  RejectionMemoriesTableName:
+    Description: Rejection Memories DynamoDB table name
+    Value: !Ref RejectionMemoriesTable
+    Export:
+      Name: !Sub outageshield-storage-${Environment}-RejectionMemoriesTableName
+
+  RejectionMemoriesTableArn:
+    Description: Rejection Memories DynamoDB table ARN
+    Value: !GetAtt RejectionMemoriesTable.Arn
+    Export:
+      Name: !Sub outageshield-storage-${Environment}-RejectionMemoriesTableArn
 
   OpenSearchEndpoint:
     Description: OpenSearch Serverless collection endpoint

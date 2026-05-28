@@ -425,6 +425,58 @@ def generate_fallback_summary(service, alarm_name, action_type, action_desc, sev
     return summary
 
 
+def generate_runbook_command(step_text, service):
+    """Generate a real AWS CLI command based on runbook step content."""
+    step_lower = step_text.lower()
+    
+    # Error/log analysis steps
+    if 'error' in step_lower and ('log' in step_lower or 'identify' in step_lower or 'type' in step_lower):
+        return f'aws logs filter-log-events --log-group-name /aws/lambda/{service} --filter-pattern "ERROR" --start-time $(date -u -d "1 hour ago" +%s)000 --limit 50'
+    
+    # Endpoint/operation correlation
+    if 'endpoint' in step_lower or 'operation' in step_lower or 'correlate' in step_lower:
+        return f'aws logs filter-log-events --log-group-name /aws/lambda/{service} --filter-pattern "{{$.path = *}}" --start-time $(date -u -d "1 hour ago" +%s)000 --limit 100'
+    
+    # External dependency/API checks
+    if 'external' in step_lower or 'dependency' in step_lower or 'api' in step_lower or 'availability' in step_lower:
+        return f'aws xray get-service-graph --start-time $(date -u -d "30 minutes ago" +%s) --end-time $(date -u +%s)'
+    
+    # Database checks
+    if 'database' in step_lower or 'db' in step_lower or 'connection' in step_lower or 'pool' in step_lower:
+        return f'aws rds describe-db-instances --query "DBInstances[?contains(DBInstanceIdentifier, \'{service}\')].{{ID:DBInstanceIdentifier,Status:DBInstanceStatus,Connections:Endpoint}}"'
+    
+    # CloudWatch metrics
+    if 'metric' in step_lower or 'cpu' in step_lower or 'memory' in step_lower or 'utilization' in step_lower:
+        return f'aws cloudwatch get-metric-statistics --namespace AWS/Lambda --metric-name Duration --dimensions Name=FunctionName,Value={service} --period 60 --statistics Average,Maximum,p99 --start-time $(date -u -d "30 minutes ago" +%Y-%m-%dT%H:%M:%SZ) --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ)'
+    
+    # X-Ray traces
+    if 'trace' in step_lower or 'x-ray' in step_lower or 'xray' in step_lower:
+        return f'aws xray get-trace-summaries --start-time $(date -u -d "1 hour ago" +%s) --end-time $(date -u +%s) --filter-expression "service(id(name: \\"{service}\\"))"'
+    
+    # Auto-scaling checks
+    if 'scaling' in step_lower or 'auto-scaling' in step_lower or 'capacity' in step_lower:
+        return f'aws autoscaling describe-auto-scaling-groups --auto-scaling-group-names {service}-asg --query "AutoScalingGroups[0].{{Desired:DesiredCapacity,Min:MinSize,Max:MaxSize,Instances:Instances[*].InstanceId}}"'
+    
+    # Health checks
+    if 'health' in step_lower or 'status' in step_lower:
+        return f'aws lambda get-function --function-name {service} --query "{{State:Configuration.State,LastModified:Configuration.LastModified,Memory:Configuration.MemorySize,Timeout:Configuration.Timeout}}"'
+    
+    # Deployment checks
+    if 'deploy' in step_lower or 'version' in step_lower or 'release' in step_lower:
+        return f'aws lambda list-versions-by-function --function-name {service} --max-items 5'
+    
+    # Alarm checks
+    if 'alarm' in step_lower or 'alert' in step_lower or 'threshold' in step_lower:
+        return f'aws cloudwatch describe-alarms --alarm-name-prefix {service} --state-value ALARM'
+    
+    # Config/settings checks
+    if 'config' in step_lower or 'setting' in step_lower or 'parameter' in step_lower:
+        return f'aws ssm get-parameters-by-path --path /{service}/ --recursive --query "Parameters[*].{{Name:Name,Value:Value}}"'
+    
+    # Default: tail logs
+    return f'aws logs tail /aws/lambda/{service} --since 10m --format short'
+
+
 def generate_smart_quick_actions(recommendations, service, alarm_name, root_cause_summary, agent_investigation):
     """
     Generate quick actions DIRECTLY from the actual remediation recommendations and investigation.
@@ -444,12 +496,14 @@ def generate_smart_quick_actions(recommendations, service, alarm_name, root_caus
             # Parse runbook steps from the description or reasoning
             import re
             steps_match = re.findall(r'(\d+)\.\s*([^0-9]+?)(?=\d+\.|$)', description + ' ' + reasoning)
-            for step_num, step_text in steps_match[:3]:  # Top 3 runbook steps
+            for step_num, step_text in steps_match[:5]:  # Top 5 runbook steps
                 step_clean = step_text.strip().rstrip('.')
                 if len(step_clean) > 10:  # Valid step
+                    # Generate a real AWS CLI command based on step content
+                    real_command = generate_runbook_command(step_clean, service)
                     actions.append({
-                        'label': f'📖 Runbook Step {step_num}: {step_clean[:50]}...',
-                        'command': f'# {step_clean}',
+                        'label': f'📖 Runbook Step {step_num}: {step_clean}',  # Full text, no truncation
+                        'command': real_command,  # Real AWS CLI command
                         'source': 'runbook',
                         'priority': 1
                     })

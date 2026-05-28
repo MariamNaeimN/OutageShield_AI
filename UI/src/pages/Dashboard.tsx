@@ -185,11 +185,19 @@ export default function Dashboard() {
                     <SortTh label="Severity"        sortKey="severity"       current={sortKey} dir={sortDir} onSort={handleSort} />
                     <SortTh label="Status"          sortKey="status"         current={sortKey} dir={sortDir} onSort={handleSort} />
                     <SortTh label="Age"             sortKey="detectedAt"     current={sortKey} dir={sortDir} onSort={handleSort} />
+                    <th className="text-left text-xs font-medium text-gray-400 uppercase px-4 py-3">Root Cause</th>
+                    <th className="text-left text-xs font-medium text-gray-400 uppercase px-4 py-3">ServiceNow</th>
                     <SortTh label="Business Impact" sortKey="businessImpact" current={sortKey} dir={sortDir} onSort={handleSort} />
                   </tr>
                 </thead>
                 <tbody>
-                  {sortedIncidents.slice(page * pageSize, (page + 1) * pageSize).map((incident, idx) => (
+                  {sortedIncidents.slice(page * pageSize, (page + 1) * pageSize).map((incident, idx) => {
+                    const raw = incident as unknown as Record<string, unknown>
+                    const snChange = raw.servicenow_change as string | undefined
+                    const snUrl = raw.servicenow_url as string | undefined
+                    // Get root cause category from rootCauses array
+                    const rootCauseCategory = incident.rootCauses?.[0]?.category || ''
+                    return (
                     <tr
                       key={incident.id}
                       className="border-b border-gray-800/50 hover:bg-gray-800/30 transition-all duration-150 animate-fade-in-up"
@@ -207,9 +215,31 @@ export default function Dashboard() {
                       <td className="px-4 py-3"><SeverityPill severity={incident.severity} /></td>
                       <td className="px-4 py-3"><StatusPill status={incident.status} /></td>
                       <td className="px-4 py-3 text-sm text-gray-400">{getAge(incident.detectedAt)}</td>
+                      <td className="px-4 py-3">
+                        {rootCauseCategory ? (
+                          <RootCausePill category={rootCauseCategory} />
+                        ) : (
+                          <span className="text-xs text-gray-600">—</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3">
+                        {snChange ? (
+                          <a 
+                            href={snUrl || `https://dev252089.service-now.com/outageshield_incident.do?number=${snChange}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium bg-emerald-900/50 text-emerald-300 border border-emerald-700/50 hover:bg-emerald-800/50 transition-colors"
+                          >
+                            <Shield className="w-3 h-3" />
+                            {snChange}
+                          </a>
+                        ) : (
+                          <span className="text-xs text-gray-600">—</span>
+                        )}
+                      </td>
                       <td className="px-4 py-3"><ImpactPill impact={incident.businessImpact} /></td>
                     </tr>
-                  ))}
+                  )})}
                 </tbody>
               </table>
             </div>
@@ -426,6 +456,19 @@ function getAge(iso: string) {
   const mins = Math.floor(diff / 60000)
   if (mins < 60) return `${mins}m`
   return `${Math.floor(mins / 60)}h ${mins % 60}m`
+}
+
+function RootCausePill({ category }: { category: string }) {
+  const config: Record<string, { label: string; classes: string }> = {
+    capacity: { label: 'Capacity', classes: 'bg-red-900/50 text-red-300 border-red-700/50' },
+    performance: { label: 'Performance', classes: 'bg-orange-900/50 text-orange-300 border-orange-700/50' },
+    configuration: { label: 'Config', classes: 'bg-amber-900/50 text-amber-300 border-amber-700/50' },
+    deployment: { label: 'Deployment', classes: 'bg-sky-900/50 text-sky-300 border-sky-700/50' },
+    dependency: { label: 'Dependency', classes: 'bg-purple-900/50 text-purple-300 border-purple-700/50' },
+    unknown: { label: 'Unknown', classes: 'bg-gray-800/50 text-gray-400 border-gray-700/50' }
+  }
+  const c = config[category.toLowerCase()] || config.unknown
+  return <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium border ${c.classes}`}>{c.label}</span>
 }
 
 

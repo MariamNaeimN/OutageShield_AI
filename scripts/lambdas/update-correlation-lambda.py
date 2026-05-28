@@ -11,11 +11,53 @@ from datetime import datetime, timezone
 
 dynamodb = boto3.resource('dynamodb')
 
+def extract_service(event):
+    """Extract service name from event - try multiple sources"""
+    signal = event.get('signal', event)
+    
+    # 1. Try signal.service
+    service = signal.get('service')
+    if service and service != 'unknown':
+        return service
+    
+    # 2. Try to extract from alarm name
+    alarm_name = signal.get('alarm_name', '')
+    if not alarm_name:
+        detail = event.get('detail', {})
+        alarm_name = detail.get('alarmName', '')
+    
+    if alarm_name and '-' in alarm_name:
+        parts = alarm_name.split('-')
+        # Skip common prefixes like HighLatency, ErrorRate, etc.
+        prefixes = ['HighLatency', 'ErrorRate', 'High', 'Low', 'Critical', 'Warning', 'Alarm', 'Alert']
+        service_parts = []
+        for part in parts:
+            if part in prefixes:
+                continue
+            if part.startswith('INC') or part.startswith('TEST') or part.startswith('E2E'):
+                break
+            if len(part) > 2:
+                service_parts.append(part)
+        if service_parts:
+            return '-'.join(service_parts[:2])  # Take first 2 parts as service name
+    
+    # 3. Try dimensions
+    detail = event.get('detail', {})
+    trigger = detail.get('trigger', signal.get('trigger', {}))
+    dimensions = trigger.get('Dimensions', [])
+    for dim in dimensions:
+        name = dim.get('name') or dim.get('Name', '')
+        if name in ['FunctionName', 'ServiceName', 'TableName']:
+            return dim.get('value') or dim.get('Value')
+    
+    return 'unknown'
+
+
 def lambda_handler(event, context):
     signal = event.get('signal', event)
-    service = signal.get('service', 'unknown')
+    service = extract_service(event)
     incident_id = signal.get('signal_id', 'INC-' + str(uuid.uuid4())[:8].upper())
-    alarm_name = signal.get('alarm_name', '')
+    alarm_name = signal.get('alarm_name', event.get('detail', {}).get('alarmName', ''))
     now = datetime.now(timezone.utc).isoformat()
     
     print(f"Correlation: Processing incident {incident_id} for service {service}")

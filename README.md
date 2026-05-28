@@ -6,7 +6,7 @@
 [![Bedrock](https://img.shields.io/badge/Amazon-Bedrock-blue)](https://aws.amazon.com/bedrock/)
 [![React](https://img.shields.io/badge/React-18.3-61dafb)](https://reactjs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Last Updated](https://img.shields.io/badge/Updated-May%202026-green)]()
+[![Last Updated](https://img.shields.io/badge/Updated-May%2028%2C%202026-green)]()
 
 ---
 
@@ -22,12 +22,13 @@ OutageShield AI is an enterprise-grade incident management platform that leverag
 - **📊 Intelligent Correlation** - Links alerts with deployments, config changes, and historical incidents
 - **💡 Smart Remediation** - Generates 9 ranked recommendations with anti-hallucination rules - all recommendations are data-driven from actual investigation findings
 - **📋 AI Summary Generation** - Produces actionable summaries with best remediation suggestion and quick action commands
-- **🎫 Ticketing Integration** - Automatic Jira and PagerDuty ticket creation
+- **🎫 Ticketing Integration** - Automatic Jira, PagerDuty, and ServiceNow ticket creation
 - **📱 Real-time Dashboard** - React-based incident command center with WebSocket updates and color-coded RCA category badges
 - **📝 Auto-generated Postmortems** - AI-generated incident summaries with timeline, impact analysis, and lessons learned
 - **🛡️ AI Prevention Recommendations** - LLM-generated long-term prevention steps based on RCA category and investigation context
 - **🚨 Escalation Alerts** - Automatic escalation for high-severity incidents (severity >= 4)
-- **✅ Human Approval Gate** - waitForTaskToken pattern for remediation approval workflow
+- **✅ Human Approval Gate** - Dashboard-based or ServiceNow approval workflow with waitForTaskToken pattern
+- **🧠 Continuous Learning** - System learns from every resolved incident to improve detection, correlation, and root-cause accuracy over time
 
 ---
 
@@ -715,37 +716,41 @@ OutageShield AI/
 │   ├── 14-cloudtrail-deployments-stack.yaml  # CloudTrail deployment tracking
 │   ├── 15-xray-config-stack.yaml    # X-Ray + Config integration
 │   ├── stepfunctions/               # Step Functions definitions
+│   │   ├── incident-workflow.asl.json  # Main workflow definition
+│   │   ├── approval-lambda.py          # Approval handler
+│   │   └── README.md
 │   ├── deploy.sh
 │   └── README.md
 │
 ├── scripts/
-│   ├── lambdas/                 # Lambda deployment scripts
+│   ├── lambdas/                 # Lambda deployment scripts (11 scripts)
 │   │   ├── create-summary-lambda.py          # AI summary generation
-│   │   ├── update-agent-actions-all-tools.py # 6 agent tools
+│   │   ├── update-agent-actions-all-tools.py # 6 agent investigation tools
 │   │   ├── update-agent-invoker.py           # Bedrock agent orchestration
+│   │   ├── update-approval-with-sn-url.py    # Approval with ServiceNow URL
 │   │   ├── update-correlation-lambda.py      # Context correlation
+│   │   ├── update-dashboard-api-with-approval.py  # Dashboard API with approval
 │   │   ├── update-detection-opensearch.py    # Detection with OpenSearch
 │   │   ├── update-postmortem-lambda.py       # AI prevention recommendations
 │   │   ├── update-rca-lambda-v2.py           # RCA with category classification
 │   │   ├── update-remediation-lambda2.py     # 9 data-driven recommendations
 │   │   └── update-scoring-lambda.py          # Severity scoring
 │   │
-│   ├── tests/                   # Test and verification scripts
-│   │   ├── analyze-actions.py
-│   │   ├── check-agent-config.py
-│   │   ├── check-ai-reasoning.py
-│   │   ├── check-counts.py
-│   │   ├── check-deployments-table.py
-│   │   ├── check-postmortem.py
-│   │   ├── check-rca-categories.py           # Verify RCA category distribution
-│   │   ├── full-workflow-test.py             # End-to-end workflow test
-│   │   ├── generate-new-postmortem.py
-│   │   ├── query-opensearch.py               # Query OpenSearch logs
-│   │   ├── regenerate-all-postmortems.py     # Regenerate with AI prevention
-│   │   ├── test-single-incident.py           # Test workflow for one incident
-│   │   └── test-summary-lambda.py
+│   ├── servicenow/              # ServiceNow integration scripts (7 scripts)
+│   │   ├── configure-servicenow-instance.py  # Configure ServiceNow instance
+│   │   ├── create-servicenow-sync-lambda.py  # Sync Lambda for ServiceNow
+│   │   ├── create-servicenow-ui.py           # ServiceNow UI components
+│   │   ├── deploy-servicenow-poller.py       # Deploy approval poller Lambda
+│   │   ├── setup-servicenow-complete.py      # Complete setup script
+│   │   ├── setup-servicenow-integration.py   # Integration setup
+│   │   └── test-servicenow-credentials.py    # Test credentials
 │   │
-│   └── sync-lambdas-to-stacks.py    # Sync Lambda code to stacks
+│   └── tests/                   # Test and verification scripts (5 scripts)
+│       ├── full-workflow-test.py             # End-to-end workflow test
+│       ├── test-approval-flow.py             # Test approval workflow
+│       ├── test-e2e-with-servicenow.py       # E2E test with ServiceNow
+│       ├── test-full-servicenow-flow.py      # Full ServiceNow flow test
+│       └── test-servicenow-integration.py    # ServiceNow integration test
 │
 ├── dashboard-api-code/          # Dashboard API Lambda
 │   └── index.py
@@ -753,7 +758,8 @@ OutageShield AI/
 ├── docs/
 │   ├── continuous-learning.md       # Continuous learning documentation
 │   ├── data-ingestion-guide.md      # Data ingestion guide
-│   └── lambda-stack-alignment.md    # Lambda-stack mapping reference
+│   ├── lambda-stack-alignment.md    # Lambda-stack mapping reference
+│   └── servicenow-setup.md          # ServiceNow integration guide
 │
 └── README.md
 ```
@@ -783,7 +789,7 @@ OutageShield AI/
 - **Routing**: React Router 6
 
 ### Integrations
-- **Ticketing**: Jira, ServiceNow
+- **Ticketing**: Jira, ServiceNow (with custom UI and approval workflow)
 - **Alerting**: PagerDuty
 - **Notifications**: Slack, Email, SMS
 
@@ -911,35 +917,39 @@ python scripts/tests/full-workflow-test.py
 ### Test Scripts
 
 ```bash
-# Test full workflow for a specific incident
-python scripts/tests/test-single-incident.py INC-XXXXXXXX
-
 # Full end-to-end workflow test
 python scripts/tests/full-workflow-test.py
 
-# Check RCA category distribution across all incidents
-python scripts/tests/check-rca-categories.py
+# Test approval workflow
+python scripts/tests/test-approval-flow.py
 
-# Regenerate postmortems with AI prevention recommendations
-python scripts/tests/regenerate-all-postmortems.py
+# Test ServiceNow integration
+python scripts/tests/test-servicenow-integration.py
 
-# Query OpenSearch logs
-python scripts/tests/query-opensearch.py
+# Full ServiceNow flow test
+python scripts/tests/test-full-servicenow-flow.py
 
-# Check AI reasoning data
-python scripts/tests/check-ai-reasoning.py
+# End-to-end test with ServiceNow
+python scripts/tests/test-e2e-with-servicenow.py
+```
 
-# Check postmortem content
-python scripts/tests/check-postmortem.py
+### ServiceNow Integration Scripts
 
-# Check agent configuration
-python scripts/tests/check-agent-config.py
+```bash
+# Test ServiceNow credentials
+python scripts/servicenow/test-servicenow-credentials.py
 
-# Check deployments table
-python scripts/tests/check-deployments-table.py
+# Deploy ServiceNow approval poller Lambda
+python scripts/servicenow/deploy-servicenow-poller.py
 
-# Test summary Lambda
-python scripts/tests/test-summary-lambda.py
+# Setup ServiceNow integration
+python scripts/servicenow/setup-servicenow-integration.py
+
+# Complete ServiceNow setup
+python scripts/servicenow/setup-servicenow-complete.py
+
+# Configure ServiceNow instance
+python scripts/servicenow/configure-servicenow-instance.py
 ```
 
 ### Verification Commands

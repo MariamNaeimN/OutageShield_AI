@@ -62,24 +62,19 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
-                  - states:SendTaskSuccess
-                  - states:SendTaskFailure
-                Resource: '*'
-              - Effect: Allow
-                Action:
                   - dynamodb:PutItem
                   - dynamodb:GetItem
                   - dynamodb:UpdateItem
                 Resource:
                   - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/outageshield-approvals-${Environment}
+                  - !ImportValue
+                    Fn::Sub: outageshield-storage-${Environment}-IncidentsTableArn
               - Effect: Allow
                 Action:
                   - sns:Publish
                 Resource:
                   - !ImportValue
                     Fn::Sub: outageshield-notifications-${Environment}-TopicArn
-                  - !ImportValue
-                    Fn::Sub: outageshield-notifications-${Environment}-EscalationTopicArn
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Approvals DynamoDB Table
@@ -119,84 +114,105 @@ Resources:
         Variables:
           ENVIRONMENT: !Ref Environment
           APPROVALS_TABLE: !Ref ApprovalsTable
+          INCIDENTS_TABLE: !ImportValue
+            Fn::Sub: outageshield-storage-${Environment}-IncidentsTableName
           APPROVAL_TOPIC_ARN: !ImportValue
             Fn::Sub: outageshield-notifications-${Environment}-TopicArn
-          ESCALATION_TOPIC_ARN: !ImportValue
-            Fn::Sub: outageshield-notifications-${Environment}-EscalationTopicArn
           DASHBOARD_URL: https://d2k1km1tzlio49.cloudfront.net
-          ESCALATION_MINUTES: '10'
       Code:
         ZipFile: |
           import json
           import boto3
           import os
-          import uuid
           from datetime import datetime, timezone, timedelta
 
-          sfn = boto3.client('stepfunctions')
           dynamodb = boto3.resource('dynamodb')
           sns = boto3.client('sns')
 
-          APPROVALS_TABLE = os.environ.get('APPROVALS_TABLE', 'outageshield-approvals')
+          APPROVALS_TABLE = os.environ.get('APPROVALS_TABLE', 'outageshield-approvals-dev')
+          INCIDENTS_TABLE = os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev')
           APPROVAL_TOPIC_ARN = os.environ.get('APPROVAL_TOPIC_ARN', '')
-          ESCALATION_TOPIC_ARN = os.environ.get('ESCALATION_TOPIC_ARN', '')
-          DASHBOARD_URL = os.environ.get('DASHBOARD_URL', 'https://outageshield.example.com')
-          ESCALATION_MINUTES = int(os.environ.get('ESCALATION_MINUTES', '10'))
+          DASHBOARD_URL = os.environ.get('DASHBOARD_URL', 'https://d2k1km1tzlio49.cloudfront.net')
 
           def lambda_handler(event, context):
-              if 'task_token' in event:
-                  return handle_send_approval(event)
-              elif event.get('mode') == 'respond':
-                  return handle_approval_response(event)
-              else:
-                  return {'statusCode': 400, 'body': 'Unknown mode'}
-
-          def handle_send_approval(event):
-              task_token = event['task_token']
-              incident_id = event['incident_id']
-              service = event['service']
+              """
+              Invoked by Step Functions with waitForTaskToken.
+              Stores task token and updates incident to "Awaiting Approval".
+              Does NOT return - Step Functions waits for SendTaskSuccess/SendTaskFailure from dashboard API.
+              """
+              print(f"Received event: {json.dumps(event, default=str)}")
+              
+              task_token = event.get('task_token')
+              incident_id = event.get('incident_id')
+              service = event.get('service', 'unknown')
+              severity_score = event.get('severity_score', 3)
               proposed_action = event.get('proposed_action', {})
               risk_level = event.get('risk_level', 'medium')
-              approval_id = str(uuid.uuid4())[:8]
+              workflow_id = event.get('workflow_id', '')
 
+              if not task_token or not incident_id:
+                  print("ERROR: Missing task_token or incident_id")
+                  return
+
+              # Use incident_id as approval_id for easy lookup from dashboard
+              approval_id = incident_id
+
+              # Store token in DynamoDB for later retrieval by dashboard API
               table = dynamodb.Table(APPROVALS_TABLE)
+              action_str = json.dumps(proposed_action) if isinstance(proposed_action, dict) else str(proposed_action or '')
+              risk_str = str(risk_level) if risk_level else 'medium'
+              
               table.put_item(Item={
-                  'approval_id': approval_id, 'incident_id': incident_id, 'task_token': task_token,
-                  'service': service, 'proposed_action': json.dumps(proposed_action), 'risk_level': risk_level,
-                  'status': 'pending', 'created_at': datetime.now(timezone.utc).isoformat(), 'escalated': False,
+                  'approval_id': approval_id,
+                  'incident_id': incident_id,
+                  'task_token': task_token,
+                  'service': service,
+                  'severity_score': int(severity_score) if severity_score else 3,
+                  'proposed_action': action_str,
+                  'risk_level': risk_str,
+                  'workflow_id': workflow_id,
+                  'status': 'pending',
+                  'created_at': datetime.now(timezone.utc).isoformat(),
                   'ttl': int((datetime.now(timezone.utc) + timedelta(days=7)).timestamp())
               })
+              print(f"Stored task token for incident {incident_id}")
 
-              approve_url = f"{DASHBOARD_URL}/approve/{approval_id}?decision=approved"
-              reject_url = f"{DASHBOARD_URL}/approve/{approval_id}?decision=rejected"
-              message = f"REMEDIATION APPROVAL REQUIRED\n\nIncident: {incident_id}\nService: {service}\nRisk: {risk_level}\n\nAPPROVE: {approve_url}\nREJECT: {reject_url}\n\nDashboard: {DASHBOARD_URL}/incidents/{incident_id}"
+              # Update incident status to "Awaiting Approval"
+              try:
+                  incidents_table = dynamodb.Table(INCIDENTS_TABLE)
+                  incidents_table.update_item(
+                      Key={'incident_id': incident_id},
+                      UpdateExpression='SET #s = :status, awaiting_approval_since = :ts, workflow_step = :ws',
+                      ExpressionAttributeNames={'#s': 'status'},
+                      ExpressionAttributeValues={
+                          ':status': 'Awaiting Approval',
+                          ':ts': datetime.now(timezone.utc).isoformat(),
+                          ':ws': 'awaiting_approval'
+                      }
+                  )
+                  print(f"Updated incident {incident_id} status to Awaiting Approval")
+              except Exception as e:
+                  print(f"Failed to update incident status: {e}")
+
+              # Send approval request notification
+              approve_url = f"{DASHBOARD_URL}/incidents/{incident_id}"
+              action_desc = ''
+              if isinstance(proposed_action, dict):
+                  action_desc = proposed_action.get('description', proposed_action.get('action', str(proposed_action)))
+              else:
+                  action_desc = str(proposed_action) if proposed_action else 'Review recommended actions'
+
+              message = f"REMEDIATION APPROVAL REQUIRED\n\nIncident: {incident_id}\nService: {service}\nSeverity: {severity_score}/5\nRisk Level: {risk_level}\n\nProposed Action:\n{action_desc}\n\nReview and approve in dashboard:\n{approve_url}\n\nThis workflow is PAUSED until you approve or reject."
 
               if APPROVAL_TOPIC_ARN:
-                  sns.publish(TopicArn=APPROVAL_TOPIC_ARN, Subject=f"[APPROVAL NEEDED] {service}", Message=message)
-              print(f"Approval request sent. ID: {approval_id}")
+                  try:
+                      sns.publish(TopicArn=APPROVAL_TOPIC_ARN, Subject=f"[APPROVAL NEEDED] {service} - {incident_id}", Message=message)
+                      print(f"Sent approval notification for {incident_id}")
+                  except Exception as e:
+                      print(f"Failed to send SNS notification: {e}")
 
-          def handle_approval_response(event):
-              approval_id = event['approval_id']
-              decision = event['decision']
-              responder = event.get('responder', 'unknown')
-
-              table = dynamodb.Table(APPROVALS_TABLE)
-              response = table.get_item(Key={'approval_id': approval_id})
-              item = response.get('Item')
-              if not item:
-                  return {'statusCode': 404, 'body': 'Not found'}
-              if item['status'] != 'pending':
-                  return {'statusCode': 409, 'body': f"Already {item['status']}"}
-
-              task_token = item['task_token']
-              table.update_item(Key={'approval_id': approval_id}, UpdateExpression='SET #s = :status, responded_at = :ts, responder = :resp',
-                  ExpressionAttributeNames={'#s': 'status'}, ExpressionAttributeValues={':status': decision, ':ts': datetime.now(timezone.utc).isoformat(), ':resp': responder})
-
-              if decision == 'approved':
-                  sfn.send_task_success(taskToken=task_token, output=json.dumps({'decision': 'approved', 'responder': responder}))
-              else:
-                  sfn.send_task_failure(taskToken=task_token, error='ApprovalRejected', cause=f'Rejected by {responder}')
-              return {'statusCode': 200, 'body': json.dumps({'approval_id': approval_id, 'decision': decision})}
+              # DO NOT return a value to Step Functions — it waits for the callback
+              print(f"Approval request created. ID: {approval_id}. Workflow paused until dashboard approval.")
 
   ApprovalLogGroup:
     Type: AWS::Logs::LogGroup
@@ -257,6 +273,8 @@ Resources:
                   - !ImportValue
                     Fn::Sub: outageshield-storage-${Environment}-IncidentsTableArn
                   - !GetAtt WorkflowStateTable.Arn
+                  - !ImportValue
+                    Fn::Sub: outageshield-storage-${Environment}-RejectionMemoriesTableArn
               - Effect: Allow
                 Action:
                   - xray:PutTraceSegments
@@ -427,16 +445,9 @@ Resources:
                   "Resource": "${SummaryArn}",
                   "TimeoutSeconds": 90,
                   "Retry": [{"ErrorEquals": ["States.ALL"], "IntervalSeconds": 5, "MaxAttempts": 2}],
-                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "CheckAutoRemediation", "ResultPath": "$.summary_error"}],
+                  "Catch": [{"ErrorEquals": ["States.ALL"], "Next": "WaitForHumanApproval", "ResultPath": "$.summary_error"}],
                   "ResultPath": "$.step4b",
-                  "Next": "CheckAutoRemediation"
-                },
-
-                "CheckAutoRemediation": {
-                  "Type": "Choice",
-                  "Comment": "If auto-remediation enabled, go to human approval gate",
-                  "Choices": [{"Variable": "$.signal.auto_remediation_enabled", "BooleanEquals": true, "Next": "WaitForHumanApproval"}],
-                  "Default": "CreateTicket"
+                  "Next": "WaitForHumanApproval"
                 },
 
                 "WaitForHumanApproval": {
@@ -487,10 +498,48 @@ Resources:
                 },
 
                 "ApprovalRejected": {
-                  "Type": "Pass",
-                  "Result": {"execution_status": "rejected_by_approver"},
-                  "ResultPath": "$.step6",
-                  "Next": "CreateTicket"
+                  "Type": "Task",
+                  "Comment": "Save rejection to memories table for learning",
+                  "Resource": "arn:aws:states:::dynamodb:putItem",
+                  "Parameters": {
+                    "TableName": "${RejectionMemoriesTable}",
+                    "Item": {
+                      "rejection_id": {"S.$": "$.signal.signal_id"},
+                      "incident_id": {"S.$": "$.signal.signal_id"},
+                      "service": {"S.$": "$.signal.service"},
+                      "rejected_at": {"S.$": "$$.State.EnteredTime"},
+                      "severity_score": {"N.$": "States.Format('{}', $.step2.severity_score)"},
+                      "root_cause": {"S.$": "$.step3.root_causes[0].description"},
+                      "proposed_action": {"S.$": "$.step4.recommendations[0].description"},
+                      "rejection_reason": {"S": "Remediation rejected by approver"},
+                      "workflow_id": {"S.$": "$$.Execution.Id"}
+                    }
+                  },
+                  "ResultPath": "$.rejection_memory",
+                  "Next": "UpdateIncidentRejected"
+                },
+
+                "UpdateIncidentRejected": {
+                  "Type": "Task",
+                  "Comment": "Update incident status to rejected",
+                  "Resource": "arn:aws:states:::dynamodb:updateItem",
+                  "Parameters": {
+                    "TableName": "${IncidentsTable}",
+                    "Key": {
+                      "incident_id": {"S.$": "$.signal.signal_id"}
+                    },
+                    "UpdateExpression": "SET #s = :status, rejected_at = :ts, workflow_status = :ws",
+                    "ExpressionAttributeNames": {
+                      "#s": "status"
+                    },
+                    "ExpressionAttributeValues": {
+                      ":status": {"S": "rejected"},
+                      ":ts": {"S.$": "$$.State.EnteredTime"},
+                      ":ws": {"S": "rejected"}
+                    }
+                  },
+                  "ResultPath": "$.incident_update",
+                  "End": true
                 },
 
                 "CreateTicket": {
@@ -577,6 +626,8 @@ Resources:
               Fn::Sub: outageshield-notifications-${Environment}-LambdaArn
             PostmortemArn: !ImportValue
               Fn::Sub: outageshield-reasoning-${Environment}-PostmortemLambdaArn
+            RejectionMemoriesTable: !ImportValue
+              Fn::Sub: outageshield-storage-${Environment}-RejectionMemoriesTableName
 
 Outputs:
   StateMachineArn:

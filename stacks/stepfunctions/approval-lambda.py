@@ -32,7 +32,7 @@ sns = boto3.client('sns')
 events = boto3.client('events')
 scheduler = boto3.client('scheduler')
 
-APPROVALS_TABLE = os.environ.get('APPROVALS_TABLE', 'outageshield-approvals')
+APPROVALS_TABLE = os.environ.get('APPROVALS_TABLE', 'outageshield-approvals-dev')
 APPROVAL_TOPIC_ARN = os.environ.get('APPROVAL_TOPIC_ARN', '')
 ESCALATION_TOPIC_ARN = os.environ.get('ESCALATION_TOPIC_ARN', '')
 DASHBOARD_URL = os.environ.get('DASHBOARD_URL', 'https://outageshield.example.com')
@@ -86,6 +86,24 @@ def handle_send_approval(event):
         'created_at': datetime.now(timezone.utc).isoformat(),
         'escalated': False
     })
+    
+    # ALSO store task token in incidents table for ServiceNow integration
+    incidents_table = dynamodb.Table(os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev'))
+    try:
+        incidents_table.update_item(
+            Key={'incident_id': incident_id},
+            UpdateExpression='SET task_token = :token, approval_id = :aid, #s = :status, awaiting_approval_since = :ts',
+            ExpressionAttributeNames={'#s': 'status'},
+            ExpressionAttributeValues={
+                ':token': task_token,
+                ':aid': approval_id,
+                ':status': 'Awaiting Approval',
+                ':ts': datetime.now(timezone.utc).isoformat()
+            }
+        )
+        print(f"[Approval] Stored task token in incidents table for {incident_id}")
+    except Exception as e:
+        print(f"[Approval] Warning: Could not update incidents table: {e}")
 
     # Send approval request notification
     approve_url = f"{DASHBOARD_URL}/approve/{approval_id}?decision=approved"

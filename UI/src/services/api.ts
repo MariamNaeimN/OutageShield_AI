@@ -45,6 +45,9 @@ export interface Incident {
   // PagerDuty integration
   pagerduty_id?: string
   pagerduty_url?: string
+  // ServiceNow integration
+  servicenow_change?: string
+  servicenow_url?: string
   // AI Reasoning data
   ai_reasoning?: AIReasoning
 }
@@ -288,7 +291,10 @@ function mapIncident(raw: any): Incident {
     remediation_summary: raw.remediation_summary,
     // PagerDuty integration
     pagerduty_id: raw.pagerduty_id,
-    pagerduty_url: raw.pagerduty_url
+    pagerduty_url: raw.pagerduty_url,
+    // ServiceNow integration
+    servicenow_change: raw.servicenow_change,
+    servicenow_url: raw.servicenow_url || (raw.servicenow_change ? `https://dev252089.service-now.com/outageshield_incident.do?number=${raw.servicenow_change}` : undefined)
   }
   
   // Debug: log notifications field
