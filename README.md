@@ -6,7 +6,7 @@
 [![Bedrock](https://img.shields.io/badge/Amazon-Bedrock-blue)](https://aws.amazon.com/bedrock/)
 [![React](https://img.shields.io/badge/React-18.3-61dafb)](https://reactjs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-blue)](https://www.typescriptlang.org)
-[![Last Updated](https://img.shields.io/badge/Updated-May%2028%2C%202026-green)]()
+[![Last Updated](https://img.shields.io/badge/Updated-May%2029%2C%202026-green)]()
 
 ---
 
@@ -24,11 +24,12 @@ OutageShield AI is an enterprise-grade incident management platform that leverag
 - **📈 Downstream Impact Scoring** - Estimates affected users based on the monitored service's business function, not the monitor itself
 - **💰 AWS Cost-Based Revenue** - Calculates revenue at risk using actual CloudWatch metrics and AWS pricing
 - **📋 AI Summary Generation** - Produces actionable summaries with best remediation suggestion and quick action commands
-- **🎫 Ticketing Integration** - Automatic Jira, PagerDuty, and ServiceNow ticket creation
+- **🎫 Ticketing Integration** - Automatic Jira (TGSHLD project), PagerDuty, and ServiceNow ticket creation with clickable links in UI
 - **📱 Real-time Dashboard** - React-based incident command center with WebSocket updates and color-coded RCA category badges
 - **📝 Auto-generated Postmortems** - AI-generated incident summaries with timeline, impact analysis, and lessons learned
 - **🛡️ AI Prevention Recommendations** - LLM-generated long-term prevention steps based on RCA category and investigation context
 - **🚨 Escalation Alerts** - Automatic escalation for high-severity incidents (severity >= 4)
+- **📧 SNS Email Notifications** - Email alerts to sre-team@shopsphere.com for alerts, approvals, and escalations
 - **✅ Human Approval Gate** - Dashboard-based or ServiceNow approval workflow with waitForTaskToken pattern
 - **🧠 Continuous Learning** - System learns from every resolved incident to improve detection, correlation, and root-cause accuracy over time
 
@@ -544,7 +545,7 @@ to handle increased load."
 - 🚨 Check Alarm: QueueBacklog-email-service
 
 ### Step 7: Ticket Creation
-- **Jira**: `TGSHLD-3112` - https://corpinfollc.atlassian.net/browse/TGSHLD-3112
+- **Jira**: `TGSHLD-3112` - https://corpinfollc.atlassian.net/browse/TGSHLD-3112 (clickable in UI)
 - **PagerDuty**: `Q0KCKCOX6887Q1` - Incident created and assigned
 
 ### Step 8: Notifications
@@ -742,34 +743,39 @@ OutageShield AI/
 │   └── README.md
 │
 ├── scripts/
-│   ├── lambdas/                 # Lambda deployment scripts (11 scripts)
-│   │   ├── create-summary-lambda.py          # AI summary generation
-│   │   ├── update-agent-actions-all-tools.py # 6 agent investigation tools
-│   │   ├── update-agent-invoker.py           # Bedrock agent orchestration
-│   │   ├── update-approval-with-sn-url.py    # Approval with ServiceNow URL
-│   │   ├── update-correlation-lambda.py      # Context correlation
-│   │   ├── update-dashboard-api-with-approval.py  # Dashboard API with approval
-│   │   ├── update-detection-opensearch.py    # Detection with OpenSearch
-│   │   ├── update-postmortem-lambda.py       # AI prevention recommendations
-│   │   ├── update-rca-lambda-v2.py           # RCA with category classification
-│   │   ├── update-remediation-lambda2.py     # 9 data-driven recommendations
-│   │   └── update-scoring-lambda.py          # Severity scoring
+│   ├── lambdas/                 # Lambda deployment scripts
+│   │   └── update-postmortem-lambda.py       # AI prevention recommendations
 │   │
-│   ├── servicenow/              # ServiceNow integration scripts (7 scripts)
+│   ├── servicenow/              # ServiceNow integration scripts (11 scripts)
 │   │   ├── configure-servicenow-instance.py  # Configure ServiceNow instance
 │   │   ├── create-servicenow-sync-lambda.py  # Sync Lambda for ServiceNow
 │   │   ├── create-servicenow-ui.py           # ServiceNow UI components
 │   │   ├── deploy-servicenow-poller.py       # Deploy approval poller Lambda
+│   │   ├── fix-data.py                       # Fix ServiceNow data
+│   │   ├── fix-ui-page.py                    # Fix ServiceNow UI page
 │   │   ├── setup-servicenow-complete.py      # Complete setup script
 │   │   ├── setup-servicenow-integration.py   # Integration setup
-│   │   └── test-servicenow-credentials.py    # Test credentials
+│   │   ├── sync-servicenow-status.py         # Sync status with ServiceNow
+│   │   ├── test-servicenow-credentials.py    # Test credentials
+│   │   └── update-servicenow-urls.py         # Update ServiceNow URLs
 │   │
-│   └── tests/                   # Test and verification scripts (5 scripts)
-│       ├── full-workflow-test.py             # End-to-end workflow test
-│       ├── test-approval-flow.py             # Test approval workflow
-│       ├── test-e2e-with-servicenow.py       # E2E test with ServiceNow
-│       ├── test-full-servicenow-flow.py      # Full ServiceNow flow test
-│       └── test-servicenow-integration.py    # ServiceNow integration test
+│   ├── tests/                   # Test and verification scripts (5 scripts)
+│   │   ├── full-workflow-test.py             # End-to-end workflow test
+│   │   ├── test-approval-flow.py             # Test approval workflow
+│   │   ├── test-e2e-with-servicenow.py       # E2E test with ServiceNow
+│   │   ├── test-full-servicenow-flow.py      # Full ServiceNow flow test
+│   │   └── test-servicenow-integration.py    # ServiceNow integration test
+│   │
+│   ├── check-incident.py        # Check incident details
+│   ├── check-postmortems.py     # Check postmortem data
+│   ├── check-servicenow.py      # Check ServiceNow status
+│   ├── check-status.py          # Check system status
+│   ├── check-tickets.py         # Match Jira tickets to incidents
+│   ├── cleanup-postmortems.py   # Clean up duplicate postmortems
+│   ├── display-all-db-data.py   # Display all DynamoDB data
+│   ├── rerun-lambdas.py         # Rerun Lambdas for incidents
+│   ├── trigger-6-incidents.py   # Trigger 6 test incidents
+│   └── trigger-detection.py     # Trigger detection Lambda
 │
 ├── dashboard-api-code/          # Dashboard API Lambda
 │   └── index.py
@@ -808,9 +814,9 @@ OutageShield AI/
 - **Routing**: React Router 6
 
 ### Integrations
-- **Ticketing**: Jira, ServiceNow (with custom UI and approval workflow)
+- **Ticketing**: Jira (TGSHLD project at corpinfollc.atlassian.net), ServiceNow (with custom UI and approval workflow)
 - **Alerting**: PagerDuty
-- **Notifications**: Slack, Email, SMS
+- **Notifications**: SNS (sre-team@shopsphere.com), Slack, Email, SMS
 
 ---
 
@@ -844,6 +850,87 @@ The system includes 9 pre-configured runbooks:
 | `AuthFailures` | Authentication Failures | manual_intervention |
 | `CacheMissRate` | High Cache Miss Rate | configuration_change |
 | `DiskUsage` | Disk Usage Critical | configuration_change |
+
+---
+
+## SNS Topics and Notifications
+
+OutageShield uses 3 SNS topics for notifications:
+
+| Topic | Purpose | Subscriber |
+|-------|---------|------------|
+| `outageshield-alerts-dev` | General incident alerts | sre-team@shopsphere.com |
+| `outageshield-approvals-dev` | Approval request notifications | sre-team@shopsphere.com |
+| `outageshield-escalation-dev` | High-severity escalations (SEV >= 4) | sre-team@shopsphere.com |
+
+### Notification Content
+Escalation notifications include:
+- Service name and severity level
+- Root cause with confidence score
+- Revenue at risk and affected users
+- Jira ticket link (clickable)
+- Quick action recommendations
+
+---
+
+## Jira Integration
+
+OutageShield automatically creates Jira tickets in the **TGSHLD** project:
+
+- **Project**: TGSHLD (corpinfollc.atlassian.net)
+- **Ticket Format**: `TGSHLD-XXXX`
+- **URL Pattern**: `https://corpinfollc.atlassian.net/browse/TGSHLD-XXXX`
+
+### Ticket Contents
+- Summary: Service name + alarm type
+- Description: Root cause, severity, affected users, revenue at risk
+- Priority: Mapped from severity score (1-5)
+- Labels: Service name, RCA category
+
+### UI Integration
+The dashboard displays clickable Jira ticket links that open directly in Atlassian.
+
+---
+
+## Testing Scripts
+
+### Trigger Test Incidents
+
+```bash
+# Trigger 6 different test incidents
+python scripts/trigger-6-incidents.py
+
+# Incidents triggered:
+# 1. HighLatency-payment-gateway
+# 2. DatabaseConnections-order-db
+# 3. ErrorRate-checkout-service
+# 4. CPUUtilization-search-cluster
+# 5. QueueBacklog-notification-service
+# 6. MemoryPressure-inventory-cache
+```
+
+### Rerun Lambdas for Existing Incidents
+
+```bash
+# Rerun all Lambdas for specific incidents
+python scripts/rerun-lambdas.py INC-XXXXXXXX
+
+# Rerun for all incidents
+python scripts/rerun-lambdas.py --all
+```
+
+### Check and Clean Data
+
+```bash
+# Display all DynamoDB data
+python scripts/display-all-db-data.py
+
+# Check Jira tickets and match to incidents
+python scripts/check-tickets.py
+
+# Clean up duplicate postmortems
+python scripts/cleanup-postmortems.py
+```
 
 ---
 
