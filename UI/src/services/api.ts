@@ -30,7 +30,7 @@ export interface Incident {
   rootCauses?: RootCauseEntry[]
   confidence?: number
   recommendations: Recommendation[]
-  ticket?: { id: string; system: string; status: string }
+  ticket?: { id: string; system: string; status: string; url?: string }
   workflowStep: string
   workflowId?: string
   // Raw fields from DynamoDB for detail page
@@ -278,7 +278,7 @@ function mapIncident(raw: any): Incident {
     rootCauses,
     confidence: raw.confidence ? Number(raw.confidence) : undefined,
     recommendations: parseRecommendations(raw.recommendations_raw || raw.recommendations),
-    ticket: raw.ticket_id ? { id: raw.ticket_id, system: raw.ticket_system || 'Jira', status: raw.ticket_status || 'Open' } : undefined,
+    ticket: parseTicketInfo(raw),
     workflowStep: raw.workflow_step || raw.workflowStep || 'unknown',
     // Preserve raw fields for detail page
     notifications: raw.notifications,
@@ -303,6 +303,51 @@ function mapIncident(raw: any): Incident {
   }
   
   return result
+}
+
+// Parse ticket info - prioritize Jira over PagerDuty for the primary ticket display
+function parseTicketInfo(raw: any): { id: string; system: string; status: string; url?: string } | undefined {
+  // Check for Jira ticket first (jira_id field or ticket_id that looks like Jira)
+  const jiraId = raw.jira_id
+  const jiraUrl = raw.jira_url
+  const ticketId = raw.ticket_id
+  const ticketSystem = raw.ticket_system || ''
+  const ticketUrl = raw.ticket_url
+  
+  // If we have a dedicated jira_id field, use it
+  if (jiraId && typeof jiraId === 'string' && jiraId.includes('-')) {
+    return {
+      id: jiraId,
+      system: 'Jira',
+      status: raw.ticket_status || 'Open',
+      url: jiraUrl || `https://corpinfollc.atlassian.net/browse/${jiraId}`
+    }
+  }
+  
+  // If ticket_id looks like a Jira ticket (contains hyphen and starts with letters)
+  if (ticketId && typeof ticketId === 'string') {
+    const isJiraFormat = /^[A-Z]+-\d+$/.test(ticketId)
+    if (isJiraFormat) {
+      return {
+        id: ticketId,
+        system: ticketSystem || 'Jira',
+        status: raw.ticket_status || 'Open',
+        url: ticketUrl || `https://corpinfollc.atlassian.net/browse/${ticketId}`
+      }
+    }
+    
+    // It's a PagerDuty ID or other system - still show it but mark correctly
+    if (ticketId !== 'N/A') {
+      return {
+        id: ticketId,
+        system: ticketSystem || 'PagerDuty',
+        status: raw.ticket_status || 'Open',
+        url: ticketUrl || raw.pagerduty_url
+      }
+    }
+  }
+  
+  return undefined
 }
 
 function parseRecommendations(raw: unknown): Recommendation[] {

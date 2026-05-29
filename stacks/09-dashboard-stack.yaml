@@ -44,6 +44,8 @@ Resources:
                   - dynamodb:Query
                   - dynamodb:GetItem
                   - dynamodb:Scan
+                  - dynamodb:UpdateItem
+                  - dynamodb:PutItem
                 Resource:
                   - !ImportValue
                     Fn::Sub: outageshield-storage-${Environment}-IncidentsTableArn

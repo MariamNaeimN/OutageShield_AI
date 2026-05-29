@@ -252,9 +252,8 @@ Resources:
           DASHBOARD_URL: https://d2k1km1tzlio49.cloudfront.net
       Code:
         ZipFile: |
-          # Ticket Integrator Lambda - Jira + PagerDuty
-          # See scripts/lambdas/add-pagerduty-integration.py for full implementation
-          # This is a placeholder - deploy full code via the script
+          # Ticket Integrator Lambda - Jira + PagerDuty (Fixed)
+          # Creates tickets in both systems and stores BOTH URLs
           import json
           import boto3
           import os
@@ -273,33 +272,70 @@ Resources:
           DASHBOARD_URL = os.environ.get('DASHBOARD_URL', 'https://d2k1km1tzlio49.cloudfront.net')
 
           def lambda_handler(event, context):
-              signal = event.get('signal', {})
-              incident_id = signal.get('signal_id', '')
-              service = signal.get('service', 'unknown')
-              step2 = event.get('step2', {})
-              step3 = event.get('step3', {})
-              severity = step2.get('severity_score', 4)
+              print(f"TicketIntegrator event: {json.dumps(event, default=str)}")
+              
+              # Handle both Step Functions format and direct invocation
+              incident_id = event.get('incident_id', '')
+              service = event.get('service', 'unknown')
+              severity = event.get('severity_score', 3)
+              
+              # Try Step Functions format
+              if not incident_id:
+                  signal = event.get('signal', {})
+                  incident_id = signal.get('signal_id', '')
+                  service = signal.get('service', service)
+              
+              step2 = event.get('step2', event.get('scoring_result', {}))
+              step3 = event.get('step3', event.get('rca_result', {}))
+              
+              if not severity or severity == 3:
+                  severity = step2.get('severity_score', event.get('severity_score', 3))
+              
               root_causes = step3.get('root_causes', [])
               top_rc = root_causes[0].get('description', 'Under investigation') if root_causes else 'Under investigation'
               
-              results = {'statusCode': 200, 'tickets': [], 'severity': severity, 'root_cause': top_rc}
+              print(f"Creating tickets for incident={incident_id}, service={service}, severity={severity}")
               
-              # Create tickets based on TICKET_SYSTEM setting
+              results = {
+                  'statusCode': 200, 
+                  'tickets': [], 
+                  'severity': severity, 
+                  'root_cause': top_rc,
+                  'jira_ticket_id': None,
+                  'jira_ticket_url': None,
+                  'pagerduty_id': None,
+                  'pagerduty_url': None
+              }
+              
+              # Create Jira ticket FIRST (primary ticket system)
               if TICKET_SYSTEM in ['jira', 'both']:
+                  print("Creating Jira ticket...")
                   jira_result = create_jira_ticket(incident_id, service, severity, top_rc)
                   results['tickets'].append(jira_result)
+                  print(f"Jira result: {jira_result}")
                   if jira_result.get('success'):
+                      results['jira_ticket_id'] = jira_result['ticket_id']
+                      results['jira_ticket_url'] = jira_result['ticket_url']
+                      # Jira is PRIMARY - set as main ticket
                       results['ticket_id'] = jira_result['ticket_id']
                       results['ticket_url'] = jira_result['ticket_url']
               
+              # Create PagerDuty incident
               if TICKET_SYSTEM in ['pagerduty', 'both']:
+                  print("Creating PagerDuty incident...")
                   pd_result = create_pagerduty_incident(incident_id, service, severity, top_rc)
                   results['tickets'].append(pd_result)
-                  if pd_result.get('success') and 'ticket_id' not in results:
-                      results['ticket_id'] = pd_result['ticket_id']
-                      results['ticket_url'] = pd_result['ticket_url']
+                  print(f"PagerDuty result: {pd_result}")
+                  if pd_result.get('success'):
+                      results['pagerduty_id'] = pd_result.get('pagerduty_id', pd_result['ticket_id'])
+                      results['pagerduty_url'] = pd_result.get('pagerduty_url', pd_result['ticket_url'])
+                      # Only use PagerDuty as primary if Jira failed
+                      if not results.get('ticket_id'):
+                          results['ticket_id'] = pd_result['ticket_id']
+                          results['ticket_url'] = pd_result['ticket_url']
               
               store_ticket_info(incident_id, results)
+              print(f"Final results: ticket_id={results.get('ticket_id')}, jira={results.get('jira_ticket_id')}, pd={results.get('pagerduty_id')}")
               return results
 
           def create_jira_ticket(incident_id, service, severity, root_cause):
@@ -311,22 +347,56 @@ Resources:
                   email = creds['email']
                   api_token = creds['api_token']
                   
-                  summary = f"[OutageShield] SEV-{severity} | {service}"[:255]
-                  priority_map = {5: 'Highest', 4: 'High', 3: 'Medium', 2: 'Low', 1: 'Lowest'}
+                  print(f"Jira config: url={jira_url}, project={project_key}, email={email}")
                   
-                  issue_data = {"fields": {"project": {"key": project_key}, "summary": summary, "issuetype": {"name": "Task"}, "priority": {"name": priority_map.get(severity, 'High')}}}
+                  summary = f"[OutageShield] SEV-{severity} | {service} | {incident_id}"[:255]
+                  dashboard_url = f"{DASHBOARD_URL}/incidents/{incident_id}"
+                  
+                  # Build description with ADF format for Jira Cloud
+                  description = {
+                      "type": "doc",
+                      "version": 1,
+                      "content": [
+                          {"type": "paragraph", "content": [{"type": "text", "text": f"OutageShield AI Incident", "marks": [{"type": "strong"}]}]},
+                          {"type": "paragraph", "content": [{"type": "text", "text": f"Incident ID: {incident_id}"}]},
+                          {"type": "paragraph", "content": [{"type": "text", "text": f"Service: {service}"}]},
+                          {"type": "paragraph", "content": [{"type": "text", "text": f"Severity: SEV-{severity}"}]},
+                          {"type": "paragraph", "content": [{"type": "text", "text": f"Root Cause: {root_cause[:500]}"}]},
+                          {"type": "paragraph", "content": [{"type": "text", "text": f"Dashboard: {dashboard_url}"}]}
+                      ]
+                  }
+                  
+                  issue_data = {
+                      "fields": {
+                          "project": {"key": project_key},
+                          "summary": summary,
+                          "description": description,
+                          "issuetype": {"name": "Task"}
+                      }
+                  }
                   
                   url = f"{jira_url}/rest/api/3/issue"
                   data = json.dumps(issue_data).encode('utf-8')
                   auth_bytes = base64.b64encode(f"{email}:{api_token}".encode()).decode()
+                  
                   req = urllib.request.Request(url, data=data, method='POST')
                   req.add_header('Content-Type', 'application/json')
                   req.add_header('Authorization', f'Basic {auth_bytes}')
-                  response = urllib.request.urlopen(req)
+                  
+                  response = urllib.request.urlopen(req, timeout=30)
                   result = json.loads(response.read().decode())
                   ticket_id = result.get('key', 'UNKNOWN')
-                  return {'system': 'Jira', 'success': True, 'ticket_id': ticket_id, 'ticket_url': f"{jira_url}/browse/{ticket_id}"}
+                  ticket_url = f"{jira_url}/browse/{ticket_id}"
+                  
+                  print(f"Jira ticket created: {ticket_id} -> {ticket_url}")
+                  return {'system': 'Jira', 'success': True, 'ticket_id': ticket_id, 'ticket_url': ticket_url}
+                  
+              except urllib.error.HTTPError as e:
+                  error_body = e.read().decode() if e.fp else ''
+                  print(f"Jira HTTP Error {e.code}: {e.reason} - {error_body[:500]}")
+                  return {'system': 'Jira', 'success': False, 'error': f"HTTP {e.code}: {error_body[:100]}"}
               except Exception as e:
+                  print(f"Jira error: {str(e)}")
                   return {'system': 'Jira', 'success': False, 'error': str(e)[:100]}
 
           def create_pagerduty_incident(incident_id, service, severity, root_cause):
@@ -338,11 +408,9 @@ Resources:
                   api_key = creds.get('api_key', '')
                   
                   severity_map = {5: 'critical', 4: 'critical', 3: 'error', 2: 'warning', 1: 'info'}
-                  pd_severity = severity_map.get(severity, 'error')
+                  pd_severity = severity_map.get(int(severity), 'error')
                   dashboard_link = f"{DASHBOARD_URL}/incidents/{incident_id}"
-                  alarm_name = f"Outage signal on {service}"
                   
-                  # Use unique dedup_key with timestamp for each new incident
                   timestamp = datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')
                   dedup_key = f"{incident_id}-{timestamp}"
                   
@@ -351,12 +419,18 @@ Resources:
                       "event_action": "trigger",
                       "dedup_key": dedup_key,
                       "payload": {
-                          "summary": f"[OutageShield] SEV-{severity} | {service} | {alarm_name}"[:255],
+                          "summary": f"[OutageShield] SEV-{severity} | {service}"[:255],
                           "source": "OutageShield AI",
                           "severity": pd_severity,
                           "timestamp": datetime.now(timezone.utc).isoformat(),
                           "component": service,
-                          "custom_details": {"incident_id": incident_id, "service": service, "severity": severity, "root_cause": root_cause, "dashboard_url": dashboard_link}
+                          "custom_details": {
+                              "incident_id": incident_id,
+                              "service": service,
+                              "severity": severity,
+                              "root_cause": root_cause[:500],
+                              "dashboard_url": dashboard_link
+                          }
                       },
                       "links": [{"href": dashboard_link, "text": "View in OutageShield Dashboard"}]
                   }
@@ -365,20 +439,20 @@ Resources:
                   data = json.dumps(event_payload).encode('utf-8')
                   req = urllib.request.Request(url, data=data, method='POST')
                   req.add_header('Content-Type', 'application/json')
-                  response = urllib.request.urlopen(req)
+                  response = urllib.request.urlopen(req, timeout=30)
                   result = json.loads(response.read().decode())
                   returned_dedup_key = result.get('dedup_key', dedup_key)
                   
-                  # Fetch real PagerDuty URL using REST API
+                  # Fetch real PagerDuty URL
                   real_pd_id, real_pd_url = None, None
                   if api_key:
-                      time.sleep(3)
+                      time.sleep(2)
                       try:
-                          search_url = "https://api.pagerduty.com/incidents?limit=50&statuses[]=triggered&statuses[]=acknowledged&sort_by=created_at:desc"
+                          search_url = "https://api.pagerduty.com/incidents?limit=20&statuses[]=triggered&statuses[]=acknowledged&sort_by=created_at:desc"
                           req2 = urllib.request.Request(search_url)
                           req2.add_header('Authorization', f'Token token={api_key}')
                           req2.add_header('Content-Type', 'application/json')
-                          resp2 = urllib.request.urlopen(req2)
+                          resp2 = urllib.request.urlopen(req2, timeout=10)
                           pd_data = json.loads(resp2.read().decode())
                           for inc in pd_data.get('incidents', []):
                               title = inc.get('title', '')
@@ -387,12 +461,16 @@ Resources:
                                   real_pd_url = inc.get('html_url', '')
                                   break
                       except Exception as e:
-                          print(f"Failed to fetch real PagerDuty URL: {e}")
+                          print(f"PagerDuty lookup failed: {e}")
                   
                   ticket_id = real_pd_id if real_pd_id else f"PD-{returned_dedup_key[:8].upper()}"
                   ticket_url = real_pd_url if real_pd_url else f"https://app.pagerduty.com/incidents?search={returned_dedup_key}"
+                  
+                  print(f"PagerDuty incident created: {ticket_id} -> {ticket_url}")
                   return {'system': 'PagerDuty', 'success': True, 'ticket_id': ticket_id, 'ticket_url': ticket_url, 'pagerduty_id': ticket_id, 'pagerduty_url': ticket_url}
+                  
               except Exception as e:
+                  print(f"PagerDuty error: {str(e)}")
                   return {'system': 'PagerDuty', 'success': False, 'error': str(e)[:100]}
 
           def store_ticket_info(incident_id, results):
@@ -401,6 +479,7 @@ Resources:
                   tickets_json = json.dumps(results.get('tickets', []))
                   ticket_systems = [t['system'] for t in results.get('tickets', []) if t.get('success')]
                   
+                  # Build update expression with ALL ticket fields
                   update_expr = 'SET ticket_id = :tid, ticket_system = :ts, ticket_status = :tst, ticket_url = :tu, tickets_all = :ta, workflow_step = :ws'
                   expr_values = {
                       ':tid': results.get('ticket_id', 'N/A'),
@@ -411,15 +490,24 @@ Resources:
                       ':ws': 'ticket_created'
                   }
                   
-                  # Add PagerDuty fields if present
-                  for t in results.get('tickets', []):
-                      if t.get('system') == 'PagerDuty' and t.get('success'):
-                          update_expr += ', pagerduty_id = :pdid, pagerduty_url = :pdurl'
-                          expr_values[':pdid'] = t.get('pagerduty_id', t.get('ticket_id', ''))
-                          expr_values[':pdurl'] = t.get('pagerduty_url', t.get('ticket_url', ''))
-                          break
+                  # Add Jira fields
+                  if results.get('jira_ticket_id'):
+                      update_expr += ', jira_ticket_id = :jid, jira_ticket_url = :jurl'
+                      expr_values[':jid'] = results['jira_ticket_id']
+                      expr_values[':jurl'] = results['jira_ticket_url']
                   
-                  table.update_item(Key={'incident_id': incident_id}, UpdateExpression=update_expr, ExpressionAttributeValues=expr_values)
+                  # Add PagerDuty fields
+                  if results.get('pagerduty_id'):
+                      update_expr += ', pagerduty_id = :pdid, pagerduty_url = :pdurl'
+                      expr_values[':pdid'] = results['pagerduty_id']
+                      expr_values[':pdurl'] = results['pagerduty_url']
+                  
+                  table.update_item(
+                      Key={'incident_id': incident_id},
+                      UpdateExpression=update_expr,
+                      ExpressionAttributeValues=expr_values
+                  )
+                  print(f"Stored ticket info for {incident_id}: jira={results.get('jira_ticket_id')}, pd={results.get('pagerduty_id')}")
               except Exception as e:
                   print(f"DynamoDB store failed: {e}")
 

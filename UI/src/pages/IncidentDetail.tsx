@@ -274,9 +274,9 @@ export default function IncidentDetail() {
               {/* Quick Links */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {incident.ticket && (
-                  <QuickLink href={`${JIRA_BASE_URL}/browse/${incident.ticket.id}`} icon={ExternalLink} title={incident.ticket.id} subtitle="Jira Ticket" color="blue" />
+                  <QuickLink href={incident.ticket.url || incident.ticket_url || `${JIRA_BASE_URL}/browse/${incident.ticket.id}`} icon={ExternalLink} title={incident.ticket.id} subtitle={incident.ticket.system || 'Jira'} color="blue" />
                 )}
-                {incident.pagerduty_id && (
+                {incident.pagerduty_id && incident.pagerduty_id !== incident.ticket?.id && (
                   <QuickLink href={incident.pagerduty_url || '#'} icon={Zap} title={incident.pagerduty_id} subtitle="PagerDuty" color="green" />
                 )}
 
@@ -290,18 +290,25 @@ export default function IncidentDetail() {
                   </div>
                   <ChevronRight className="w-4 h-4 text-gray-600" />
                 </Link>
-                {incident.notifications && (
-                  <button onClick={() => setShowSnsModal(true)} className="flex items-center gap-3 p-4 rounded-lg bg-[#161b22] border border-gray-800 hover:bg-gray-800/50 transition-colors group text-left">
-                    <div className="w-10 h-10 rounded-lg bg-amber-900/30 flex items-center justify-center">
-                      <Bell className="w-5 h-5 text-amber-400" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-white group-hover:text-amber-300 transition-colors">SNS Alert</p>
-                      <p className="text-xs text-gray-500">View notification</p>
-                    </div>
-                    <ChevronRight className="w-4 h-4 text-gray-600" />
-                  </button>
-                )}
+                {incident.notifications && (() => {
+                  let snsTopicName = 'outageshield-escalation-dev';
+                  try {
+                    const notifData = typeof incident.notifications === 'string' ? JSON.parse(incident.notifications) : incident.notifications;
+                    snsTopicName = notifData?.sns_topic || 'outageshield-escalation-dev';
+                  } catch { /* use default */ }
+                  return (
+                    <button onClick={() => setShowSnsModal(true)} className="flex items-center gap-3 p-4 rounded-lg bg-[#161b22] border border-gray-800 hover:bg-gray-800/50 transition-colors group text-left">
+                      <div className="w-10 h-10 rounded-lg bg-amber-900/30 flex items-center justify-center">
+                        <Bell className="w-5 h-5 text-amber-400" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-white group-hover:text-amber-300 transition-colors">{snsTopicName}</p>
+                        <p className="text-xs text-gray-500">View notification</p>
+                      </div>
+                      <ChevronRight className="w-4 h-4 text-gray-600" />
+                    </button>
+                  );
+                })()}
               </div>
             </>
           )}
@@ -593,7 +600,13 @@ export default function IncidentDetail() {
 
 
       {/* SNS Modal */}
-      {showSnsModal && incident.notifications && createPortal(
+      {showSnsModal && incident.notifications && (() => {
+        let snsTopicName = 'outageshield-escalation-dev';
+        try {
+          const notifData = typeof incident.notifications === 'string' ? JSON.parse(incident.notifications) : incident.notifications;
+          snsTopicName = notifData?.sns_topic || 'outageshield-escalation-dev';
+        } catch { /* use default */ }
+        return createPortal(
         <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" onClick={() => setShowSnsModal(false)}>
           <div className="relative w-full max-w-xl max-h-[80vh] overflow-auto rounded-xl bg-[#161b22] border border-gray-800 shadow-2xl" onClick={e => e.stopPropagation()}>
             <div className="sticky top-0 z-10 flex items-center justify-between p-4 bg-[#161b22]/95 backdrop-blur border-b border-gray-800">
@@ -602,7 +615,7 @@ export default function IncidentDetail() {
                   <Bell className="w-5 h-5 text-amber-400" />
                 </div>
                 <div>
-                  <h2 className="text-sm font-semibold text-white">SNS Notification</h2>
+                  <h2 className="text-sm font-semibold text-white">{snsTopicName}</h2>
                   <p className="text-xs text-gray-500">{incident.id}</p>
                 </div>
               </div>
@@ -615,11 +628,12 @@ export default function IncidentDetail() {
                 let notifData: Record<string, unknown> = {}
                 try { notifData = typeof incident.notifications === 'string' ? JSON.parse(incident.notifications) : incident.notifications as Record<string, unknown> }
                 catch { notifData = { raw: incident.notifications } }
+                const snsTopic = notifData.sns_topic || 'outageshield-escalation-dev'
                 return (
                   <>
                     <div className="grid grid-cols-2 gap-3">
-                      <InfoBox label="Type" value={String(notifData.type || 'Alert')} />
-                      <InfoBox label="Channel" value={String(notifData.channel || 'SNS')} />
+                      <InfoBox label="Type" value={String(notifData.type || 'escalation')} />
+                      <InfoBox label="SNS Topic" value={String(snsTopic)} />
                       <InfoBox label="Recipient" value={String(notifData.recipient || 'N/A')} />
                       <InfoBox label="Sent" value={notifData.sent_at ? new Date(String(notifData.sent_at)).toLocaleString() : 'N/A'} />
                     </div>
@@ -646,7 +660,7 @@ export default function IncidentDetail() {
           </div>
         </div>,
         document.body
-      )}
+      )})()}
     </div>
   )
 }

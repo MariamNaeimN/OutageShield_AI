@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Bell, Ticket, ChevronRight, ExternalLink, Zap } from 'lucide-react'
+import { Bell, Ticket, ChevronRight, ExternalLink, Zap, Search, X } from 'lucide-react'
 import { getActiveIncidents } from '../services/api'
 
 const JIRA_BASE_URL = 'https://corpinfollc.atlassian.net'
@@ -9,6 +9,7 @@ interface NotificationRecord {
   id: string
   type: string
   channel: string
+  sns_topic?: string
   status: string
   sent_at: string
   recipient: string
@@ -48,6 +49,7 @@ export default function Notifications() {
   const [pagerdutyIncidents, setPagerdutyIncidents] = useState<PagerDutyRecord[]>([])
   const [loading, setLoading] = useState(true)
   const [tab, setTab] = useState<'jira' | 'pagerduty' | 'sns'>('jira')
+  const [filter, setFilter] = useState('')
 
   useEffect(() => {
     const fetchData = async () => {
@@ -198,51 +200,107 @@ export default function Notifications() {
         </button>
       </div>
 
+      {/* Filter Input */}
+      <div className="relative w-full max-w-md">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+        <input
+          type="text"
+          placeholder="Filter by Incident ID or Service name..."
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          className="w-full pl-10 pr-10 py-2.5 bg-[#161b22] border border-gray-800 rounded-lg text-sm text-white placeholder-gray-500 focus:outline-none focus:border-gray-600 transition-colors"
+        />
+        {filter && (
+          <button
+            onClick={() => setFilter('')}
+            className="absolute right-3 top-1/2 -translate-y-1/2 p-1 rounded hover:bg-gray-800 transition-colors"
+          >
+            <X className="w-3 h-3 text-gray-500" />
+          </button>
+        )}
+      </div>
+
       {/* Jira Tab */}
-      {tab === 'jira' && (
-        <div className="space-y-2 animate-fade-in-up">
-          {tickets.length === 0 ? (
-            <div className="bg-[#161b22] border border-gray-800 rounded-xl p-8 text-center text-gray-500 animate-scale-in">No Jira tickets</div>
-          ) : tickets.map((t, i) => (
-            <div key={i} className="animate-fade-in-up" style={{ animationDelay: `${Math.min(i * 40, 400)}ms` }}>
-              <ExpandableTicket ticket={t} />
-            </div>
-          ))}
-        </div>
-      )}
+      {tab === 'jira' && (() => {
+        const filteredTickets = filter
+          ? tickets.filter(t => 
+              t.incident_id.toLowerCase().includes(filter.toLowerCase()) ||
+              t.service.toLowerCase().includes(filter.toLowerCase())
+            )
+          : tickets
+        return (
+          <div className="space-y-2 animate-fade-in-up">
+            {filteredTickets.length === 0 ? (
+              <div className="bg-[#161b22] border border-gray-800 rounded-xl p-8 text-center text-gray-500 animate-scale-in">
+                {filter ? `No Jira tickets matching "${filter}"` : 'No Jira tickets'}
+              </div>
+            ) : filteredTickets.map((t, i) => (
+              <div key={i} className="animate-fade-in-up" style={{ animationDelay: `${Math.min(i * 40, 400)}ms` }}>
+                <ExpandableTicket ticket={t} />
+              </div>
+            ))}
+          </div>
+        )
+      })()}
 
       {/* PagerDuty Tab */}
-      {tab === 'pagerduty' && (
-        <div className="space-y-2 animate-fade-in-up">
-          {pagerdutyIncidents.length === 0 ? (
-            <div className="bg-[#161b22] border border-gray-800 rounded-xl p-8 text-center text-gray-500 animate-scale-in">No PagerDuty incidents</div>
-          ) : pagerdutyIncidents.map((pd, i) => (
-            <div key={i} className="animate-fade-in-up" style={{ animationDelay: `${Math.min(i * 40, 400)}ms` }}>
-              <ExpandablePagerDuty incident={pd} />
-            </div>
-          ))}
-        </div>
-      )}
+      {tab === 'pagerduty' && (() => {
+        const filteredPD = filter
+          ? pagerdutyIncidents.filter(pd => 
+              pd.incident_id.toLowerCase().includes(filter.toLowerCase()) ||
+              pd.service.toLowerCase().includes(filter.toLowerCase())
+            )
+          : pagerdutyIncidents
+        return (
+          <div className="space-y-2 animate-fade-in-up">
+            {filteredPD.length === 0 ? (
+              <div className="bg-[#161b22] border border-gray-800 rounded-xl p-8 text-center text-gray-500 animate-scale-in">
+                {filter ? `No PagerDuty incidents matching "${filter}"` : 'No PagerDuty incidents'}
+              </div>
+            ) : filteredPD.map((pd, i) => (
+              <div key={i} className="animate-fade-in-up" style={{ animationDelay: `${Math.min(i * 40, 400)}ms` }}>
+                <ExpandablePagerDuty incident={pd} />
+              </div>
+            ))}
+          </div>
+        )
+      })()}
 
       {/* SNS Tab */}
-      {tab === 'sns' && (
-        <div className="space-y-2 animate-fade-in-up">
-          {notifications.length === 0 ? (
-            <div className="bg-[#161b22] border border-gray-800 rounded-xl p-8 text-center text-gray-500 animate-scale-in">No SNS alerts</div>
-          ) : notifications.map((n, i) => (
-            <div key={i} className="animate-fade-in-up" style={{ animationDelay: `${Math.min(i * 40, 400)}ms` }}>
-              <ExpandableNotification notif={n} />
-            </div>
-          ))}
-        </div>
-      )}
+      {tab === 'sns' && (() => {
+        const filteredNotifs = filter
+          ? notifications.filter(n => 
+              n.incident_id?.toLowerCase().includes(filter.toLowerCase()) ||
+              n.service?.toLowerCase().includes(filter.toLowerCase())
+            )
+          : notifications
+        return (
+          <div className="space-y-2 animate-fade-in-up">
+            {filteredNotifs.length === 0 ? (
+              <div className="bg-[#161b22] border border-gray-800 rounded-xl p-8 text-center text-gray-500 animate-scale-in">
+                {filter ? `No SNS alerts matching "${filter}"` : 'No SNS alerts'}
+              </div>
+            ) : filteredNotifs.map((n, i) => (
+              <div key={i} className="animate-fade-in-up" style={{ animationDelay: `${Math.min(i * 40, 400)}ms` }}>
+                <ExpandableNotification notif={n} />
+              </div>
+            ))}
+          </div>
+        )
+      })()}
     </div>
   )
 }
 
 function ExpandableTicket({ ticket }: { ticket: TicketRecord }) {
   const navigate = useNavigate()
-  const jiraUrl = `${JIRA_BASE_URL}/browse/${ticket.ticket_id}`
+  // Build URL based on ticket system - only use Jira URL for actual Jira tickets
+  const isJiraTicket = /^[A-Z]+-\d+$/.test(ticket.ticket_id)
+  const ticketUrl = isJiraTicket 
+    ? `${JIRA_BASE_URL}/browse/${ticket.ticket_id}`
+    : ticket.system === 'PagerDuty' 
+      ? `https://rackspace-marim.eu.pagerduty.com/incidents/${ticket.ticket_id}`
+      : '#'
 
   return (
     <div className="bg-[#161b22] border border-gray-800 rounded-xl overflow-hidden hover:border-blue-800/50 hover-lift transition-all duration-200">
@@ -266,12 +324,12 @@ function ExpandableTicket({ ticket }: { ticket: TicketRecord }) {
         <div className="flex items-center gap-3 flex-shrink-0">
           <span className="text-xs text-gray-500">{ticket.service}</span>
           <a
-            href={jiraUrl}
+            href={ticketUrl}
             target="_blank"
             rel="noreferrer"
             onClick={(e) => e.stopPropagation()}
             className="p-1.5 rounded-md hover:bg-blue-900/30 text-gray-500 hover:text-blue-400 transition-colors"
-            title="Open in Jira"
+            title={`Open in ${ticket.system}`}
           >
             <ExternalLink className="w-4 h-4" />
           </a>
@@ -297,7 +355,7 @@ function ExpandableNotification({ notif }: { notif: NotificationRecord }) {
               <span className={`px-2 py-0.5 rounded text-xs font-bold ${notif.type === 'escalation' ? 'bg-red-900/50 text-red-300' : 'bg-blue-900/50 text-blue-300'}`}>
                 {notif.type}
               </span>
-              <span className="text-sm text-gray-300">{notif.channel}</span>
+              <span className="text-sm text-gray-300">{notif.sns_topic || 'outageshield-escalation-dev'}</span>
               <span className="px-2 py-0.5 rounded text-xs font-medium bg-green-900/30 text-green-300">{notif.status}</span>
             </div>
             <p className="text-xs text-gray-400 mt-0.5 truncate">{notif.recipient}</p>

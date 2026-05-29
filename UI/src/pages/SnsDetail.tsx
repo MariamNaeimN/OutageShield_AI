@@ -62,6 +62,7 @@ export default function SnsDetail() {
   }
 
   const isEscalation = String(notification?.type) === 'escalation'
+  const snsTopicName = notification?.sns_topic || 'outageshield-escalation-dev'
 
   return (
     <div className="space-y-6 animate-fade-in-up">
@@ -77,7 +78,7 @@ export default function SnsDetail() {
             <ChevronRight className="w-3 h-3" />
             <Link to="/notifications" className="hover:text-gray-400 transition-colors">Notifications</Link>
             <ChevronRight className="w-3 h-3" />
-            <span className="text-gray-400 font-medium">SNS Alert</span>
+            <span className="text-gray-400 font-medium">{String(snsTopicName)}</span>
           </div>
         </div>
         <span className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs border ${isEscalation ? 'bg-red-900/20 text-red-400 border-red-800/40' : 'bg-purple-900/20 text-purple-400 border-purple-800/40'}`}>
@@ -94,7 +95,7 @@ export default function SnsDetail() {
             <Bell className="w-7 h-7 text-white" />
           </div>
           <div>
-            <h2 className="text-xl font-bold text-white">SNS Alert Details</h2>
+            <h2 className="text-xl font-bold text-white">{String(snsTopicName)}</h2>
             <p className="text-sm text-gray-400 mt-0.5">{incident.service} &middot; {incident.id}</p>
           </div>
         </div>
@@ -118,10 +119,10 @@ export default function SnsDetail() {
         {/* Channel & Recipient */}
         <div className="grid grid-cols-2 gap-4 animate-fade-in-up" style={{ animationDelay: '150ms' }}>
           <div className="bg-[#0d1117] border border-gray-800 rounded-lg p-3">
-            <p className="text-[10px] font-medium text-gray-500 uppercase tracking-wide mb-1.5">Channel</p>
+            <p className="text-[10px] font-medium text-gray-500 uppercase tracking-wide mb-1.5">SNS Topic</p>
             <div className="flex items-center gap-2">
               <Send className="w-4 h-4 text-purple-400" />
-              <p className="text-sm text-gray-200 font-medium">{String(notification?.channel || 'SNS')}</p>
+              <p className="text-sm text-gray-200 font-medium">{String(snsTopicName)}</p>
             </div>
           </div>
           <div className="bg-[#0d1117] border border-gray-800 rounded-lg p-3">

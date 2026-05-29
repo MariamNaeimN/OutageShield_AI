@@ -1,10 +1,34 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { ArrowLeft, Ticket, ExternalLink, LayoutDashboard, ChevronRight, Home } from 'lucide-react'
+import { ArrowLeft, Zap, ExternalLink, LayoutDashboard, ChevronRight, Home } from 'lucide-react'
 import { getActiveIncidents, type Incident } from '../services/api'
 
+const PAGERDUTY_BASE_URL = 'https://rackspace-marim.eu.pagerduty.com'
 const JIRA_BASE_URL = 'https://corpinfollc.atlassian.net'
 const DASHBOARD_URL = import.meta.env.VITE_DASHBOARD_URL || 'https://d2k1km1tzlio49.cloudfront.net'
+
+// Helper to check if ticket ID is Jira format (e.g., TGSHLD-3187)
+const isJiraTicket = (ticketId: string | undefined): boolean => {
+  if (!ticketId) return false
+  return /^[A-Z]+-\d+$/.test(ticketId)
+}
+
+// Get the correct ticket URL based on ticket system
+const getTicketUrl = (incident: Incident): string => {
+  // If we have a direct ticket URL, use it
+  if (incident.ticket?.url) return incident.ticket.url
+  
+  const ticketId = incident.ticket?.id
+  if (!ticketId) return ''
+  
+  // Check if it's a Jira ticket
+  if (isJiraTicket(ticketId)) {
+    return `${JIRA_BASE_URL}/browse/${ticketId}`
+  }
+  
+  // Otherwise it's PagerDuty
+  return incident.pagerduty_url || `${PAGERDUTY_BASE_URL}/incidents/${ticketId}`
+}
 
 export default function TicketDetail() {
   const { id } = useParams()
@@ -34,9 +58,9 @@ export default function TicketDetail() {
     return (
       <div className="flex flex-col items-center justify-center h-64 gap-4 animate-fade-in-up">
         <div className="relative">
-          <div className="w-12 h-12 rounded-full border-2 border-blue-500/20 border-t-blue-500 animate-spin" />
+          <div className="w-12 h-12 rounded-full border-2 border-green-500/20 border-t-green-500 animate-spin" />
           <div className="absolute inset-0 flex items-center justify-center">
-            <Ticket className="w-4 h-4 text-blue-400" />
+            <Zap className="w-4 h-4 text-green-400" />
           </div>
         </div>
         <p className="text-sm text-gray-500 animate-pulse">Loading ticket...</p>
@@ -80,30 +104,30 @@ export default function TicketDetail() {
           </div>
         </div>
         <a
-          href={`${JIRA_BASE_URL}/browse/${incident.ticket?.id || ''}`}
+          href={getTicketUrl(incident)}
           target="_blank"
           rel="noreferrer"
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-900/20 border border-blue-800/40 text-xs text-blue-400 hover:bg-blue-900/30 transition-all duration-200"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-green-900/20 border border-green-800/40 text-xs text-green-400 hover:bg-green-900/30 transition-all duration-200"
         >
           <ExternalLink className="w-3 h-3" />
-          Open in Jira
+          Open in {isJiraTicket(incident.ticket?.id) ? 'Jira' : 'PagerDuty'}
         </a>
       </div>
 
       {/* Header Card */}
       <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-[#161b22] via-[#161b22] to-[#0d1117] border border-gray-800/80 p-6 animate-scale-in">
-        <div className="absolute top-0 right-0 w-64 h-64 bg-blue-600/5 rounded-full blur-3xl pointer-events-none" />
+        <div className="absolute top-0 right-0 w-64 h-64 bg-green-600/5 rounded-full blur-3xl pointer-events-none" />
         <div className="relative flex items-center gap-4">
-          <div className="w-14 h-14 bg-gradient-to-br from-blue-600 to-brand-600 rounded-2xl flex items-center justify-center shadow-lg shadow-blue-500/20 animate-float">
-            <Ticket className="w-7 h-7 text-white" />
+          <div className="w-14 h-14 bg-gradient-to-br from-green-600 to-emerald-600 rounded-2xl flex items-center justify-center shadow-lg shadow-green-500/20 animate-float">
+            <Zap className="w-7 h-7 text-white" />
           </div>
           <div>
             <div className="flex items-center gap-3">
               <h2 className="text-xl font-bold text-white">{incident.ticket?.id || 'Linked Ticket'}</h2>
-              <span className="px-2.5 py-1 rounded-lg text-xs font-medium bg-blue-900/30 text-blue-300 border border-blue-800/40">{incident.ticket?.status || 'Open'}</span>
+              <span className="px-2.5 py-1 rounded-lg text-xs font-medium bg-green-900/30 text-green-300 border border-green-800/40">{incident.ticket?.status || 'Open'}</span>
               <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-red-900/40 text-red-300 border border-red-700/50">{ticketContent.priority || 'Critical'}</span>
             </div>
-            <p className="text-sm text-gray-400 mt-1">{incident.service} &middot; {incident.ticket?.system || 'Jira'}</p>
+            <p className="text-sm text-gray-400 mt-1">{incident.service} &middot; {incident.ticket?.system || 'PagerDuty'}</p>
           </div>
         </div>
       </div>
@@ -173,14 +197,26 @@ export default function TicketDetail() {
         {/* Action Links */}
         <div className="flex flex-wrap gap-3 pt-3 border-t border-gray-800/50 animate-fade-in-up" style={{ animationDelay: '400ms' }}>
           <a
-            href={`${JIRA_BASE_URL}/browse/${incident.ticket?.id || ''}`}
+            href={getTicketUrl(incident)}
             target="_blank"
             rel="noreferrer"
-            className="inline-flex items-center gap-2 text-sm text-blue-400 hover:text-blue-300 bg-blue-900/20 border border-blue-800/40 rounded-lg px-4 py-2.5 hover-lift transition-all duration-200"
+            className="inline-flex items-center gap-2 text-sm text-green-400 hover:text-green-300 bg-green-900/20 border border-green-800/40 rounded-lg px-4 py-2.5 hover-lift transition-all duration-200"
           >
             <ExternalLink className="w-4 h-4" />
-            {incident.ticket?.id || 'View'} on Jira
+            {incident.ticket?.id || 'View'} on {isJiraTicket(incident.ticket?.id) ? 'Jira' : 'PagerDuty'}
           </a>
+          {/* Show PagerDuty link separately if we have both Jira and PagerDuty */}
+          {isJiraTicket(incident.ticket?.id) && incident.pagerduty_url && (
+            <a
+              href={incident.pagerduty_url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-2 text-sm text-orange-400 hover:text-orange-300 bg-orange-900/20 border border-orange-800/40 rounded-lg px-4 py-2.5 hover-lift transition-all duration-200"
+            >
+              <ExternalLink className="w-4 h-4" />
+              View on PagerDuty
+            </a>
+          )}
           <a
             href={ticketContent.dashboard_url || `${DASHBOARD_URL}/incidents/${incident.id}`}
             target="_blank"

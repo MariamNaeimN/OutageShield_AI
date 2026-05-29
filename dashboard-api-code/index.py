@@ -190,6 +190,8 @@ def handle_approval(approval_id, event):
     """
     from datetime import datetime, timezone
     
+    print(f"handle_approval called for {approval_id}")
+    
     # Parse request body
     body = event.get('body', '{}')
     if isinstance(body, str):
@@ -201,11 +203,14 @@ def handle_approval(approval_id, event):
     decision = body.get('decision', 'approved')
     responder = body.get('responder', 'dashboard-user')
     
+    print(f"Decision: {decision}, Responder: {responder}")
+    
     if decision not in ['approved', 'rejected']:
         return response(400, {'error': 'Invalid decision. Must be "approved" or "rejected"'})
     
     # Get task token from approvals table
     approvals_table = dynamodb.Table(os.environ.get('APPROVALS_TABLE', 'outageshield-approvals-dev'))
+    incidents_table = dynamodb.Table(os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev'))
     
     try:
         result = approvals_table.get_item(Key={'approval_id': approval_id})
@@ -217,39 +222,37 @@ def handle_approval(approval_id, event):
     if not item:
         return response(404, {'error': f'Approval request {approval_id} not found'})
     
-    if item.get('status') != 'pending':
-        return response(409, {
-            'error': 'Approval already processed',
-            'status': item.get('status'),
-            'responded_at': item.get('responded_at')
-        })
-    
     task_token = item.get('task_token')
     incident_id = item.get('incident_id', approval_id)
+    current_status = item.get('status', 'pending')
     
-    if not task_token:
-        return response(400, {'error': 'No task token found for this approval'})
+    print(f"Current approval status: {current_status}, incident_id: {incident_id}")
+    
+    # If already processed, still update the incident but don't try Step Functions again
+    already_processed = current_status != 'pending'
     
     now = datetime.now(timezone.utc).isoformat()
+    new_status = 'Approved' if decision == 'approved' else 'Rejected'
     
-    # Update approval record
-    approvals_table.update_item(
-        Key={'approval_id': approval_id},
-        UpdateExpression='SET #s = :status, responded_at = :ts, responder = :resp, decision = :dec',
-        ExpressionAttributeNames={'#s': 'status'},
-        ExpressionAttributeValues={
-            ':status': decision,
-            ':ts': now,
-            ':resp': responder,
-            ':dec': decision
-        }
-    )
-    print(f"Updated approval {approval_id} to {decision}")
-    
-    # Update incident status
+    # Always update approval record
     try:
-        incidents_table = dynamodb.Table(os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev'))
-        new_status = 'Mitigating' if decision == 'approved' else 'Investigating'
+        approvals_table.update_item(
+            Key={'approval_id': approval_id},
+            UpdateExpression='SET #s = :status, responded_at = :ts, responder = :resp, decision = :dec',
+            ExpressionAttributeNames={'#s': 'status'},
+            ExpressionAttributeValues={
+                ':status': decision,
+                ':ts': now,
+                ':resp': responder,
+                ':dec': decision
+            }
+        )
+        print(f"Updated approval {approval_id} to {decision}")
+    except Exception as e:
+        print(f"Failed to update approval: {e}")
+    
+    # Always update incident status
+    try:
         incidents_table.update_item(
             Key={'incident_id': incident_id},
             UpdateExpression='SET #s = :status, approval_decision = :dec, approved_by = :by, approved_at = :ts',
@@ -264,36 +267,41 @@ def handle_approval(approval_id, event):
         print(f"Updated incident {incident_id} status to {new_status}")
     except Exception as e:
         print(f"Failed to update incident status: {e}")
+        # Return error if incident update fails
+        return response(500, {'error': f'Failed to update incident: {str(e)}'})
     
-    # Resume Step Functions
-    try:
-        if decision == 'approved':
-            sfn.send_task_success(
-                taskToken=task_token,
-                output=json.dumps({
-                    'decision': 'approved',
-                    'responder': responder,
-                    'responded_at': now
-                })
-            )
-            print(f"Sent SendTaskSuccess for {approval_id}")
-        else:
-            sfn.send_task_failure(
-                taskToken=task_token,
-                error='ApprovalRejected',
-                cause=f'Rejected by {responder}'
-            )
-            print(f"Sent SendTaskFailure for {approval_id}")
-    except Exception as e:
-        print(f"Failed to resume Step Functions: {e}")
-        return response(500, {'error': f'Failed to resume workflow: {str(e)}'})
+    # Resume Step Functions only if not already processed
+    if not already_processed and task_token:
+        try:
+            if decision == 'approved':
+                sfn.send_task_success(
+                    taskToken=task_token,
+                    output=json.dumps({
+                        'decision': 'approved',
+                        'responder': responder,
+                        'responded_at': now
+                    })
+                )
+                print(f"Sent SendTaskSuccess for {approval_id}")
+            else:
+                sfn.send_task_failure(
+                    taskToken=task_token,
+                    error='ApprovalRejected',
+                    cause=f'Rejected by {responder}'
+                )
+                print(f"Sent SendTaskFailure for {approval_id}")
+        except Exception as e:
+            print(f"Failed to resume Step Functions: {e}")
+            # Don't fail - the approval and incident are already updated
     
     return response(200, {
         'success': True,
         'approvalId': approval_id,
+        'incidentId': incident_id,
         'decision': decision,
+        'newStatus': new_status,
         'responder': responder,
-        'message': f'Remediation {decision}. Workflow will {"continue" if decision == "approved" else "be notified"}.'
+        'message': f'Remediation {decision}. Status updated to {new_status}.'
     })
 
 
@@ -380,7 +388,7 @@ def handle_servicenow_callback(event):
     # Update incident status - THIS IS THE KEY PART
     try:
         incidents_table = dynamodb.Table(os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev'))
-        new_status = 'Mitigating' if decision == 'approved' else 'Rejected'
+        new_status = 'Approved' if decision == 'approved' else 'Rejected'
         incidents_table.update_item(
             Key={'incident_id': incident_id},
             UpdateExpression='SET #s = :status, approval_decision = :dec, approved_by = :by, approved_at = :ts',

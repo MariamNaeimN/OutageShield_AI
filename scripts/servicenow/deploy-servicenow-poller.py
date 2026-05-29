@@ -33,20 +33,22 @@ from datetime import datetime, timezone
 
 sfn = boto3.client('stepfunctions')
 dynamodb = boto3.resource('dynamodb')
-secrets = boto3.client('secretsmanager')
+ssm = boto3.client('ssm')
 
-SERVICENOW_INSTANCE = os.environ.get('SERVICENOW_INSTANCE', 'dev252089.service-now.com')
 APPROVALS_TABLE = os.environ.get('APPROVALS_TABLE', 'outageshield-approvals-dev')
 INCIDENTS_TABLE = os.environ.get('INCIDENTS_TABLE', 'outageshield-incidents-dev')
 
 
 def get_servicenow_credentials():
+    """Get ServiceNow credentials from SSM Parameter Store."""
     try:
-        secret = secrets.get_secret_value(SecretId='outageshield/servicenow')
-        creds = json.loads(secret['SecretString'])
-        return creds['username'], creds['password']
-    except:
-        return os.environ.get('SN_USERNAME', 'admin'), os.environ.get('SN_PASSWORD', '')
+        instance = ssm.get_parameter(Name='/outageshield/servicenow/instance')['Parameter']['Value']
+        username = ssm.get_parameter(Name='/outageshield/servicenow/username', WithDecryption=True)['Parameter']['Value']
+        password = ssm.get_parameter(Name='/outageshield/servicenow/password', WithDecryption=True)['Parameter']['Value']
+        return instance, username, password
+    except Exception as e:
+        print(f"Error getting SSM parameters: {e}")
+        return 'dev252089.service-now.com', 'admin', ''
 
 
 def make_sn_request(url, username, password):
@@ -70,7 +72,7 @@ def make_sn_request(url, username, password):
 def lambda_handler(event, context):
     print("[Poller] Starting ServiceNow approval poll...")
     
-    username, password = get_servicenow_credentials()
+    sn_instance, username, password = get_servicenow_credentials()
     
     table = dynamodb.Table(APPROVALS_TABLE)
     response = table.scan(
@@ -105,7 +107,7 @@ def lambda_handler(event, context):
                 print(f"[Poller] No ServiceNow number for {incident_id}")
                 continue
             
-            sn_url = f"https://{SERVICENOW_INSTANCE}/api/now/table/change_request?sysparm_query=number={sn_number}&sysparm_fields=number,state,approval&sysparm_limit=1"
+            sn_url = f"https://{sn_instance}/api/now/table/change_request?sysparm_query=number={sn_number}&sysparm_fields=number,state,approval,u_outageshield_approval_status&sysparm_limit=1"
             
             data = make_sn_request(sn_url, username, password)
             if not data:
@@ -119,12 +121,13 @@ def lambda_handler(event, context):
             change = results[0]
             state = change.get('state', '')
             approval_status = change.get('approval', '')
+            os_approval = change.get('u_outageshield_approval_status', '').upper()
             
-            print(f"[Poller] {sn_number}: state={state}, approval={approval_status}")
+            print(f"[Poller] {sn_number}: state={state}, approval={approval_status}, os_approval={os_approval}")
             
-            # Check approval status
-            is_approved = approval_status == 'approved' or state in ['-2', '-1', '0', '3']
-            is_rejected = approval_status == 'rejected' or state == '4'
+            # Check approval status - also check our custom field
+            is_approved = approval_status == 'approved' or state in ['-2', '-1', '0', '3'] or os_approval == 'APPROVED'
+            is_rejected = approval_status == 'rejected' or state == '4' or os_approval == 'REJECTED'
             
             if is_approved:
                 print(f"[Poller] ✅ {sn_number} APPROVED!")
@@ -133,7 +136,7 @@ def lambda_handler(event, context):
                         taskToken=task_token,
                         output=json.dumps({
                             'decision': 'approved',
-                            'responder': 'servicenow',
+                            'responder': 'servicenow-poller',
                             'servicenow_number': sn_number,
                             'responded_at': datetime.now(timezone.utc).isoformat()
                         })
@@ -146,18 +149,19 @@ def lambda_handler(event, context):
                         ExpressionAttributeValues={
                             ':status': 'approved',
                             ':ts': datetime.now(timezone.utc).isoformat(),
-                            ':by': 'servicenow'
+                            ':by': 'servicenow-poller'
                         }
                     )
                     
                     incidents_table.update_item(
                         Key={'incident_id': incident_id},
-                        UpdateExpression='SET #s = :status, approved_at = :ts, approved_by = :by',
+                        UpdateExpression='SET #s = :status, approved_at = :ts, approved_by = :by, approval_decision = :dec',
                         ExpressionAttributeNames={'#s': 'status'},
                         ExpressionAttributeValues={
                             ':status': 'Approved',
                             ':ts': datetime.now(timezone.utc).isoformat(),
-                            ':by': 'servicenow'
+                            ':by': 'servicenow-poller',
+                            ':dec': 'approved'
                         }
                     )
                     
@@ -182,18 +186,19 @@ def lambda_handler(event, context):
                         ExpressionAttributeValues={
                             ':status': 'rejected',
                             ':ts': datetime.now(timezone.utc).isoformat(),
-                            ':by': 'servicenow'
+                            ':by': 'servicenow-poller'
                         }
                     )
                     
                     incidents_table.update_item(
                         Key={'incident_id': incident_id},
-                        UpdateExpression='SET #s = :status, rejected_at = :ts, rejected_by = :by',
+                        UpdateExpression='SET #s = :status, rejected_at = :ts, rejected_by = :by, approval_decision = :dec',
                         ExpressionAttributeNames={'#s': 'status'},
                         ExpressionAttributeValues={
                             ':status': 'Rejected',
                             ':ts': datetime.now(timezone.utc).isoformat(),
-                            ':by': 'servicenow'
+                            ':by': 'servicenow-poller',
+                            ':dec': 'rejected'
                         }
                     )
                     
@@ -281,15 +286,17 @@ def main():
             ZipFile=zip_bytes
         )
         
+        # Wait for code update to complete
+        import time
+        print("Waiting for code update to complete...")
+        time.sleep(10)
+        
         lambda_client.update_function_configuration(
             FunctionName=LAMBDA_NAME,
             Environment={
                 'Variables': {
-                    'SERVICENOW_INSTANCE': 'dev252089.service-now.com',
                     'APPROVALS_TABLE': 'outageshield-approvals-dev',
-                    'INCIDENTS_TABLE': 'outageshield-incidents-dev',
-                    'SN_USERNAME': 'admin',
-                    'SN_PASSWORD': 'Rackspace@2025'
+                    'INCIDENTS_TABLE': 'outageshield-incidents-dev'
                 }
             },
             Timeout=60
@@ -308,11 +315,8 @@ def main():
             MemorySize=256,
             Environment={
                 'Variables': {
-                    'SERVICENOW_INSTANCE': 'dev252089.service-now.com',
                     'APPROVALS_TABLE': 'outageshield-approvals-dev',
-                    'INCIDENTS_TABLE': 'outageshield-incidents-dev',
-                    'SN_USERNAME': 'admin',
-                    'SN_PASSWORD': 'Rackspace@2025'
+                    'INCIDENTS_TABLE': 'outageshield-incidents-dev'
                 }
             }
         )

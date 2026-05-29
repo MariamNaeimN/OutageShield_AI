@@ -3,11 +3,26 @@ Rerun scoring, remediation, and summary Lambdas for specific incidents.
 """
 import boto3
 import json
+import sys
 
 lambda_client = boto3.client('lambda', region_name='us-east-1')
 dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 
-INCIDENTS = ['INC-2B3885E0', 'INC-B2F8A87F']
+# Default incidents - can be overridden by command line args
+DEFAULT_INCIDENTS = ['INC-2B3885E0', 'INC-B2F8A87F']
+
+def get_all_incidents():
+    """Fetch all incident IDs from DynamoDB."""
+    table = dynamodb.Table('outageshield-incidents-dev')
+    response = table.scan(ProjectionExpression='incident_id')
+    incidents = [item['incident_id'] for item in response.get('Items', [])]
+    while 'LastEvaluatedKey' in response:
+        response = table.scan(
+            ProjectionExpression='incident_id',
+            ExclusiveStartKey=response['LastEvaluatedKey']
+        )
+        incidents.extend([item['incident_id'] for item in response.get('Items', [])])
+    return incidents
 
 def get_incident(incident_id):
     """Fetch incident from DynamoDB."""
@@ -123,20 +138,65 @@ def rerun_for_incident(incident_id):
     except Exception as e:
         print(f"     ❌ Summary failed: {e}")
     
+    # 4. Rerun Postmortem Lambda
+    print(f"\n  4️⃣ Running Postmortem Lambda...")
+    postmortem_payload = {
+        'incident_id': incident_id,
+        'service': service,
+        'alarm_name': alarm_name,
+        'root_causes': root_causes,
+        'incident_context': incident_context,
+        'signal': {'signal_id': incident_id, 'service': service},
+        'step2': scoring_result,
+        'step3': {'root_causes': root_causes},
+        'step3b': {'investigation': agent_investigation},
+        'step4': remediation_result
+    }
+    try:
+        postmortem_result = invoke_lambda('outageshield-postmortem-dev', postmortem_payload)
+        postmortem = postmortem_result.get('postmortem', {})
+        print(f"     ✅ Postmortem generated")
+        print(f"     📝 Title: {postmortem.get('title', 'N/A')[:60]}...")
+    except Exception as e:
+        print(f"     ❌ Postmortem failed: {e}")
+    
     print(f"\n  ✅ Completed processing {incident_id}")
 
 def main():
+    # Check for --all flag or specific incident IDs
+    if len(sys.argv) > 1:
+        if sys.argv[1] == '--all':
+            incidents = get_all_incidents()
+            print(f"Processing ALL {len(incidents)} incidents...")
+        else:
+            incidents = sys.argv[1:]
+            print(f"Processing {len(incidents)} specified incidents...")
+    else:
+        incidents = DEFAULT_INCIDENTS
+        print(f"Processing default incidents: {incidents}")
+    
     print("="*60)
     print("Rerunning Lambdas for Incidents")
     print("="*60)
-    print(f"Incidents: {INCIDENTS}")
-    print(f"Lambdas: scoring, remediation, summary")
+    print(f"Total incidents: {len(incidents)}")
+    print(f"Lambdas: scoring, remediation, summary, postmortem")
     
-    for incident_id in INCIDENTS:
-        rerun_for_incident(incident_id)
+    success_count = 0
+    error_count = 0
+    
+    for i, incident_id in enumerate(incidents):
+        print(f"\n[{i+1}/{len(incidents)}] ", end="")
+        try:
+            rerun_for_incident(incident_id)
+            success_count += 1
+        except Exception as e:
+            print(f"  ❌ Error: {e}")
+            error_count += 1
     
     print(f"\n{'='*60}")
-    print("Done! Check the dashboard for updated data.")
+    print(f"Done! Processed {len(incidents)} incidents.")
+    print(f"  ✅ Success: {success_count}")
+    print(f"  ❌ Errors: {error_count}")
     print("="*60)
 
 if __name__ == '__main__':
